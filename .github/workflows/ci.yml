@@ -21,15 +21,18 @@ jobs:
           tofu_version: "1.12.1"
 
       - name: tofu fmt check
+        if: ${{ hashFiles('infra/**/*.tf') != '' }}
         run: tofu fmt -check -recursive infra/
 
       - name: tofu validate (dc environment)
+        if: ${{ hashFiles('infra/environments/dc/*.tf') != '' }}
         working-directory: infra/environments/dc
         run: |
           tofu init -backend=false
           tofu validate
 
       - name: tofu validate (cloud environment)
+        if: ${{ hashFiles('infra/environments/cloud/*.tf') != '' }}
         working-directory: infra/environments/cloud
         run: |
           tofu init -backend=false

@@ -6,6 +6,9 @@ validate:tofu-fmt:
   image:
     name: ghcr.io/opentofu/opentofu:1.12.1
     entrypoint: [""]
+  rules:
+    - exists:
+        - infra/**/*.tf
   script:
     - tofu fmt -check -recursive infra/
 
@@ -14,6 +17,9 @@ validate:tofu-dc:
   image:
     name: ghcr.io/opentofu/opentofu:1.12.1
     entrypoint: [""]
+  rules:
+    - exists:
+        - infra/environments/dc/*.tf
   script:
     - cd infra/environments/dc && tofu init -backend=false && tofu validate
 
@@ -22,6 +28,9 @@ validate:tofu-cloud:
   image:
     name: ghcr.io/opentofu/opentofu:1.12.1
     entrypoint: [""]
+  rules:
+    - exists:
+        - infra/environments/cloud/*.tf
   script:
     - cd infra/environments/cloud && tofu init -backend=false && tofu validate
 
