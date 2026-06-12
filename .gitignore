@@ -1,0 +1,62 @@
+# Secrets & local config
+.env
+*.env
+!*.env.example
+*.tfvars
+!*.tfvars.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+.secrets/
+
+# Terraform / OpenTofu
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Terraform plan outputs (may contain variable values)
+*.tfplan
+tfplan
+
+# Kubernetes credentials (client certs inside)
+kubeconfig
+*.kubeconfig
+kubeconfig.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.pytest_cache/
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Docker
+docker-compose.override.yml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# pre-commit cache
+.pre-commit-cache/

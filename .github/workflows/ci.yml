@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "feat/**", "fix/**"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  validate:
+    name: Validate & Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up OpenTofu
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: "1.12.1"
+
+      - name: tofu fmt check
+        run: tofu fmt -check -recursive infra/
+
+      - name: tofu validate (dc environment)
+        working-directory: infra/environments/dc
+        run: |
+          tofu init -backend=false
+          tofu validate
+
+      - name: tofu validate (cloud environment)
+        working-directory: infra/environments/cloud
+        run: |
+          tofu init -backend=false
+          tofu validate
+
+      - name: ShellCheck
+        uses: ludeeus/action-shellcheck@2.0.0
+        with:
+          severity: warning
+          scandir: "."
+
+      - name: Check for secrets (gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate YAML files
+        run: |
+          pip install yamllint
+          yamllint -d "{extends: relaxed, rules: {line-length: disable}}" .
