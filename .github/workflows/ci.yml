@@ -45,9 +45,9 @@ jobs:
           scandir: "."
 
       - name: Check for secrets (gitleaks)
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:latest \
+            detect --source=/repo --redact -v
 
       - name: Validate YAML files
         run: |
