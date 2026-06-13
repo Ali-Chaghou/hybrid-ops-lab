@@ -46,9 +46,14 @@ jobs:
           assert 422 "$code" post_invalid
           code=$(curl -s -o /dev/null -w '%{http_code}' localhost:8000/movements)
           assert 200 "$code" get_list
-          curl -s localhost:8000/metrics | grep -qE '^inventory_movements_created_total' \
-            || { echo "FAIL metrics: inventory_movements_created_total missing"; exit 1; }
-          echo "OK metrics: inventory_movements_created_total present"
+          metrics=$(curl -s localhost:8000/metrics)
+          if printf '%s\n' "$metrics" | grep -qE '^inventory_movements_created_total '; then
+            echo "OK metrics: inventory_movements_created_total present"
+          else
+            echo "FAIL metrics: inventory_movements_created_total missing"
+            printf '%s\n' "$metrics" | grep -i movements || true
+            exit 1
+          fi
           echo "all endpoint checks passed"
 
       - name: Dump container logs on failure
