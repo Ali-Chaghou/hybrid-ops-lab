@@ -1,0 +1,62 @@
+name: build-and-test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare env file (placeholder values for CI)
+        working-directory: sites/dc
+        run: cp .env.example .env
+
+      - name: Build and start stack (db + inventory)
+        working-directory: sites/dc
+        run: docker compose --env-file .env up -d --build db inventory
+
+      - name: Wait for app readiness
+        run: |
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' localhost:8000/readyz || true)
+            if [ "$code" = "200" ]; then echo "app ready"; exit 0; fi
+            echo "attempt $i: readyz=$code"; sleep 2
+          done
+          echo "app did not become ready in time"; exit 1
+
+      - name: Test endpoints (real HTTP contract)
+        run: |
+          set -euo pipefail
+          assert() {
+            if [ "$2" != "$1" ]; then echo "FAIL $3: expected $1, got $2"; exit 1; fi
+            echo "OK $3: $2"
+          }
+          code=$(curl -s -o /dev/null -w '%{http_code}' localhost:8000/healthz)
+          assert 200 "$code" healthz
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST localhost:8000/movements \
+            -H 'Content-Type: application/json' \
+            -d '{"sku":"CI-001","quantity":5,"warehouse":"CI"}')
+          assert 201 "$code" post_valid
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST localhost:8000/movements \
+            -H 'Content-Type: application/json' \
+            -d '{"sku":"X","quantity":0,"warehouse":"CI"}')
+          assert 422 "$code" post_invalid
+          code=$(curl -s -o /dev/null -w '%{http_code}' localhost:8000/movements)
+          assert 200 "$code" get_list
+          curl -s localhost:8000/metrics | grep -qE '^inventory_movements_created_total' \
+            || { echo "FAIL metrics: inventory_movements_created_total missing"; exit 1; }
+          echo "OK metrics: inventory_movements_created_total present"
+          echo "all endpoint checks passed"
+
+      - name: Dump container logs on failure
+        if: failure()
+        working-directory: sites/dc
+        run: docker compose logs
+
+      - name: Tear down
+        if: always()
+        working-directory: sites/dc
+        run: docker compose --env-file .env down -v
