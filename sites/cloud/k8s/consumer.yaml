@@ -11,7 +11,7 @@ metadata:
 data:
   # SQS-Endpoint des Hosts, aus dem Cluster ueber host.k3d.internal erreichbar.
   # In Phase 5 zeigt SQS_ENDPOINT_URL stattdessen auf die Toxiproxy-Adresse.
-  SQS_ENDPOINT_URL: "http://host.k3d.internal:9324"
+  SQS_ENDPOINT_URL: "http://host.k3d.internal:9326"
   SQS_QUEUE_URL: "http://host.k3d.internal:9324/000000000000/inventory-movements"
   AWS_REGION: "eu-central-1"
 ---
@@ -45,6 +45,10 @@ spec:
       labels:
         app: inventory-consumer
     spec:
+      hostAliases:
+        - ip: "172.19.0.1"
+          hostnames:
+            - "host.k3d.internal"
       containers:
         - name: consumer
           image: inventory-consumer:dev
