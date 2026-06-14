@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 #
 # setup-site-cloud.sh — bringt Host site-cloud in den Soll-Zustand:
-# installiert Docker Engine + Compose-Plugin aus dem offiziellen Docker-Repo
-# und zieht den site-cloud-Stack hoch. Idempotent: mehrfach ausfuehrbar.
+# installiert Docker Engine + Compose-Plugin aus dem offiziellen Docker-Repo,
+# zieht den site-cloud-Stack hoch und installiert k3d + kubectl (Consumer-Cluster).
+# Idempotent: mehrfach ausfuehrbar.
 #
 # Ziel-OS: Ubuntu 24.04. Aufruf auf der VM:  sudo ./ops/bootstrap/setup-site-cloud.sh
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SITE_DIR="${REPO_ROOT}/sites/cloud"
+
+K3D_VERSION="v5.9.0"
+KUBECTL_VERSION="v1.35.5"
 
 log() { printf '\n[setup-site-cloud] %s\n' "$1"; }
 
@@ -61,5 +65,25 @@ log "Starte site-cloud-Stack"
 cd "${SITE_DIR}"
 docker compose --env-file .env up -d --build
 
+# --- 7. k3d + kubectl installieren (Phase 4: Consumer-Cluster) ---
+# Nur die Tools. Das Cluster wird bewusst NICHT hier (als root) erzeugt, sondern
+# als normaler Nutzer, damit die kubeconfig im richtigen Home landet.
+if ! command -v k3d >/dev/null 2>&1; then
+  log "Installiere k3d ${K3D_VERSION}"
+  curl -fsSLo /usr/local/bin/k3d \
+    "https://github.com/k3d-io/k3d/releases/download/${K3D_VERSION}/k3d-linux-${ARCH}"
+  chmod +x /usr/local/bin/k3d
+fi
+
+if ! command -v kubectl >/dev/null 2>&1; then
+  log "Installiere kubectl ${KUBECTL_VERSION}"
+  curl -fsSLo /usr/local/bin/kubectl \
+    "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl"
+  chmod +x /usr/local/bin/kubectl
+fi
+
 log "Fertig. Status:"
+cd "${SITE_DIR}"
 docker compose ps
+k3d version
+kubectl version --client
