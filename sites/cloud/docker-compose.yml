@@ -2,6 +2,8 @@ name: hol-site-cloud
 services:
   sqs:
     image: softwaremill/elasticmq:1.6.16
+    volumes:
+      - ./elasticmq.conf:/opt/elasticmq.conf
     ports:
       - "9324:9324"   # SQS-API (AWS-SDK-kompatibel)
       - "9325:9325"   # ElasticMQ-Management-UI/REST
