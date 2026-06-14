@@ -1,0 +1,24 @@
+groups:
+  - name: strecke
+    rules:
+      # Strecke langsam: HTTP-Probe durch Toxiproxy dauert > 2s.
+      - alert: StreckeDegraded
+        expr: probe_duration_seconds{job="blackbox-strecke"} > 2
+        for: 1m
+        labels:
+          severity: warning
+          site: cloud
+        annotations:
+          summary: "Strecke degradiert (hohe Latenz)"
+          description: "Probe-Latenz ueber der Strecke seit 1m > 2s ({{ $labels.instance }})."
+
+      # Strecke tot: HTTP-Probe schlaegt fehl.
+      - alert: StreckeDown
+        expr: probe_success{job="blackbox-strecke"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          site: cloud
+        annotations:
+          summary: "Strecke nicht erreichbar"
+          description: "Blackbox-Probe ueber die Strecke schlaegt seit 1m fehl ({{ $labels.instance }})."

@@ -34,6 +34,16 @@ Aufheben der Störung fällt die Latenz sofort zurück. Reproduzierbar über die
 Chaos-Skripte in `ops/chaos/`; Ablauf und Diagnose im
 [Runbook](docs/runbook-link-degradation.md).
 
+Auf dasselbe Signal feuert eine Alert-Regel: `StreckeDegraded`
+(`probe_duration_seconds > 2` für 1 Minute) geht nach anhaltender Drosselung in
+den Zustand *firing* und wird an den Alertmanager geroutet.
+
+![Alertmanager mit aktivem StreckeDegraded-Alert](docs/img/alertmanager-firing.png)
+
+Der Alertmanager nutzt im Lab einen Null-Receiver (kein echter Versand, keine
+Secrets im Repo); eine zweite Regel `StreckeDown` (`probe_success == 0`) deckt den
+Totalausfall ab.
+
 ## Schnellstart
 
 Voraussetzungen: zwei Ubuntu-24-VMs (hol-site-dc, hol-site-cloud) im selben Netz,

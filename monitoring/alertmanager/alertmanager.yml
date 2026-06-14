@@ -1,0 +1,12 @@
+# Minimale Konfiguration fuer das Lab: Alerts werden gruppiert und verworfen
+# (Null-Receiver), damit keine echten Slack-/Mail-Secrets ins Repo muessen.
+# Fuer echten Versand hier einen Receiver (z.B. webhook/slack) ergaenzen.
+route:
+  receiver: 'null'
+  group_by: ['alertname']
+  group_wait: 10s
+  group_interval: 1m
+  repeat_interval: 1h
+
+receivers:
+  - name: 'null'
