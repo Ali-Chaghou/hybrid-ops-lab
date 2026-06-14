@@ -1,0 +1,92 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: inventory
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: consumer-config
+  namespace: inventory
+data:
+  # SQS-Endpoint des Hosts, aus dem Cluster ueber host.k3d.internal erreichbar.
+  # In Phase 5 zeigt SQS_ENDPOINT_URL stattdessen auf die Toxiproxy-Adresse.
+  SQS_ENDPOINT_URL: "http://host.k3d.internal:9324"
+  SQS_QUEUE_URL: "http://host.k3d.internal:9324/000000000000/inventory-movements"
+  AWS_REGION: "eu-central-1"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: consumer-aws-creds
+  namespace: inventory
+type: Opaque
+stringData:
+  # Dummy-Credentials fuer den lokalen Emulator: ElasticMQ ignoriert sie, boto3
+  # verlangt nur nicht-leere Werte. KEINE echten Secrets. Gegen echtes AWS
+  # wuerde man IRSA / External Secrets nutzen, nicht committete Werte.
+  AWS_ACCESS_KEY_ID: "test"
+  AWS_SECRET_ACCESS_KEY: "test"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inventory-consumer
+  namespace: inventory
+  labels:
+    app: inventory-consumer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: inventory-consumer
+  template:
+    metadata:
+      labels:
+        app: inventory-consumer
+    spec:
+      containers:
+        - name: consumer
+          image: inventory-consumer:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: consumer-config
+            - secretRef:
+                name: consumer-aws-creds
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inventory-consumer
+  namespace: inventory
+  labels:
+    app: inventory-consumer
+spec:
+  selector:
+    app: inventory-consumer
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
