@@ -8,6 +8,17 @@ services:
       - "9324:9324"   # SQS-API (AWS-SDK-kompatibel)
       - "9325:9325"   # ElasticMQ-Management-UI/REST
     restart: unless-stopped
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.12.0
+    command: ["-host=0.0.0.0", "-config=/config/toxiproxy.json"]
+    volumes:
+      - ./toxiproxy.json:/config/toxiproxy.json:ro
+    ports:
+      - "8474:8474"   # Toxiproxy-API (Toxics steuern)
+      - "9326:9326"   # Strecke: Proxy-Listener -> ElasticMQ
+    depends_on:
+      - sqs
+    restart: unless-stopped
   node_exporter:
     image: quay.io/prometheus/node-exporter:v1.11.1
     command:

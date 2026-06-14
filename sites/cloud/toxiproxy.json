@@ -1,0 +1,8 @@
+[
+  {
+    "name": "elasticmq",
+    "listen": "0.0.0.0:9326",
+    "upstream": "sqs:9324",
+    "enabled": true
+  }
+]
