@@ -13,6 +13,27 @@ verbunden über eine gedrosselte Netzwerkstrecke (Toxiproxy).
 Das Diagramm zeigt die Zielarchitektur. Der aktuelle Implementierungsstand
 steht im Abschnitt [Status](#status).
 
+## Monitoring & Incident-Nachweis
+
+Prometheus scrapt beide Standorte (node-Metriken, die inventory-App und Toxiproxy)
+und probt die Strecke zusätzlich per Blackbox-Exporter. Ein provisioniertes
+Grafana-Dashboard macht die Signale sichtbar.
+
+![Grafana-Dashboard im Normalbetrieb](docs/img/grafana-dashboard.png)
+
+Normalbetrieb: Die Probe-Latenz über die Strecke liegt im einstelligen
+Millisekundenbereich, die Probe ist erfolgreich (Wert 1), der Durchsatz durch den
+Toxiproxy-Proxy ist stabil, und beide Sites liefern ihre node-Metriken.
+
+![Grafana-Dashboard während der gedrosselten Strecke](docs/img/grafana-incident.png)
+
+Incident: Eine über Toxiproxy injizierte Latenz von ~7 s lässt die Probe-Latenz
+sprunghaft ansteigen — die beiden Plateaus sind zwei Drossel-Zyklen. Die Probe
+bleibt dabei erfolgreich (Wert 1): die Strecke ist langsam, nicht tot. Nach dem
+Aufheben der Störung fällt die Latenz sofort zurück. Reproduzierbar über die
+Chaos-Skripte in `ops/chaos/`; Ablauf und Diagnose im
+[Runbook](docs/runbook-link-degradation.md).
+
 ## Schnellstart
 
 Voraussetzungen: zwei Ubuntu-24-VMs (hol-site-dc, hol-site-cloud) im selben Netz,
