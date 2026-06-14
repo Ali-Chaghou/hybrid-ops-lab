@@ -10,7 +10,8 @@ services:
     restart: unless-stopped
   toxiproxy:
     image: ghcr.io/shopify/toxiproxy:2.12.0
-    command: ["-host=0.0.0.0", "-config=/config/toxiproxy.json"]
+    # -proxy-metrics/-runtime-metrics schalten /metrics frei (default aus -> sonst 404).
+    command: ["-host=0.0.0.0", "-config=/config/toxiproxy.json", "-proxy-metrics", "-runtime-metrics"]
     volumes:
       - ./toxiproxy.json:/config/toxiproxy.json:ro
     ports:

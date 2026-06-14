@@ -1,0 +1,3 @@
+[
+  { "targets": ["SITE_DC_HOST:9100"], "labels": { "site": "dc" } }
+]

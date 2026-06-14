@@ -1,0 +1,3 @@
+[
+  { "targets": ["SITE_DC_HOST:8000"], "labels": { "site": "dc", "app": "inventory" } }
+]

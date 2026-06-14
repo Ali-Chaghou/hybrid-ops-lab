@@ -1,0 +1,45 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: node-cloud
+    static_configs:
+      - targets: ['host.docker.internal:9100']
+        labels:
+          site: cloud
+
+  - job_name: toxiproxy
+    static_configs:
+      - targets: ['host.docker.internal:8474']
+        labels:
+          site: cloud
+
+  # dc-Site ueber file_sd, damit echte IPs nicht im versionierten Config stehen.
+  - job_name: node-dc
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/node-dc.json']
+
+  - job_name: inventory
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/inventory.json']
+
+  # Blackbox: HTTP-Probe durch die Strecke (Toxiproxy :9326 -> ElasticMQ).
+  # Bei aktiver Latenz-Stoerung steigt probe_duration_seconds sichtbar.
+  - job_name: blackbox-strecke
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets: ['http://host.docker.internal:9326/?Action=ListQueues&Version=2012-11-05']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox:9115
