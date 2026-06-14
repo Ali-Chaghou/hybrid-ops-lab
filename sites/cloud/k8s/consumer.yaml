@@ -45,8 +45,12 @@ spec:
       labels:
         app: inventory-consumer
     spec:
+      # host.k3d.internal wird in CoreDNS unzuverlaessig injiziert (k3s reconcilet
+      # die ConfigMap). Stattdessen die k3d-Netz-Gateway-IP (= VM-Host aus Pod-Sicht)
+      # statisch mappen. Der Platzhalter wird beim Deploy ersetzt
+      # (ops/deploy/deploy-consumer.sh ermittelt die IP dynamisch).
       hostAliases:
-        - ip: "172.19.0.1"
+        - ip: "__K3D_GATEWAY__"
           hostnames:
             - "host.k3d.internal"
       containers:
