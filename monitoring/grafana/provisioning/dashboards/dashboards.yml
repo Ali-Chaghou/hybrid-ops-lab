@@ -1,0 +1,12 @@
+apiVersion: 1
+
+providers:
+  - name: hybrid-ops
+    orgId: 1
+    type: file
+    disableDeletion: false
+    # Dashboards werden read-only aus dem gemounteten Ordner geladen.
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

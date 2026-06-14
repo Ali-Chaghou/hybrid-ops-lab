@@ -1,0 +1,11 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    # Container-DNS im Compose-Netz hol-monitoring (Service prometheus).
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
