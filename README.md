@@ -8,20 +8,10 @@ verbunden über eine gedrosselte Netzwerkstrecke (Toxiproxy).
 
 ## Architektur-Überblick
 
-```
-  site-dc (hol-site-dc)                       site-cloud (hol-site-cloud)
- ┌──────────────────────┐                    ┌────────────────────────────────┐
- │  inventory-App       │                    │  LocalStack (SQS)              │
- │  (REST, publisht     │    "Strecke"       │        │                       │
- │   Events)            │  ┌────────────┐    │        ▼                       │
- │        │             ├──► Toxiproxy  ├───►│  Consumer (k3d)                │
- │        ▼             │  └────────────┘    │  Probes + Limits               │
- │  Postgres            │                    │                                │
- │  node_exporter       │                    │  Prometheus · Grafana          │
- └──────────────────────┘                    │  Alertmanager · Blackbox       │
-          ▲                                  └────────────────────────────────┘
-          └──────────────── Monitoring scrapt beide Sites ─────────────────────┘
-```
+![Architektur-Überblick](docs/img/architecture.png)
+
+Das Diagramm zeigt die Zielarchitektur. Der aktuelle Implementierungsstand
+steht im Abschnitt [Status](#status).
 
 ## Schnellstart
 
