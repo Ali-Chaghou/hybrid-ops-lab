@@ -14,3 +14,9 @@ variable "message_retention_seconds" {
   type        = number
   default     = 345600
 }
+
+variable "sqs_managed_sse_enabled" {
+  description = "Enable server-side encryption with SQS-managed keys (SSE-SQS)"
+  type        = bool
+  default     = true
+}

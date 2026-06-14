@@ -8,6 +8,14 @@ repos:
     rev: v2.2.2
     hooks:
       - id: tofu_fmt
+      - id: tofu_validate
+      - id: tofu_docs
+        args:
+          - --hook-config=--path-to-file=README.md
+          - --hook-config=--add-to-existing-file=true
+          - --hook-config=--use-standard-markers=true
+      - id: tofu_tflint
+      - id: tofu_trivy
 
   - repo: https://github.com/shellcheck-py/shellcheck-py
     rev: v0.10.0.1
