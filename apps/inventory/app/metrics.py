@@ -5,7 +5,18 @@ from prometheus_client import Counter, Histogram
 
 MOVEMENTS_CREATED = Counter(
     "inventory_movements_created_total",
-    "Anzahl persistierter Lagerbewegungen.",
+    "Anzahl persistierter Lagerbewegungen (erst nach erfolgreichem Commit).",
+)
+
+OUTBOX_EVENTS_WRITTEN = Counter(
+    "inventory_outbox_events_written_total",
+    "In derselben Transaktion wie das Movement geschriebene Outbox-Events "
+    "(erst nach erfolgreichem Commit).",
+)
+
+MOVEMENT_TX_FAILURES = Counter(
+    "inventory_movement_tx_failures_total",
+    "Fehlgeschlagene und vollstaendig zurueckgerollte Movement-/Outbox-Transaktionen.",
 )
 
 EVENTS_PUBLISHED = Counter(

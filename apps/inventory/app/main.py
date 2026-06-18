@@ -1,7 +1,9 @@
 """inventory-Service (site-dc).
 
-Klassische REST-App: nimmt Lagerbewegungen an, persistiert sie in Postgres
-und publiziert (ab Phase 3) ein Event an die Queue.
+Klassische REST-App: nimmt Lagerbewegungen an und schreibt sie ab Phase 2B
+ATOMAR zusammen mit ihrem Outbox-Event (event_outbox) in einer einzigen
+PostgreSQL-Transaktion. Der Request-Pfad publiziert NICHTS an eine Queue und
+macht keine Netzwerkoperation; ein separater Publisher folgt in Phase 3.
 """
 from __future__ import annotations
 
@@ -15,8 +17,12 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
 
 from app import db
-from app.events import publish_movement
-from app.metrics import MOVEMENTS_CREATED, REQUEST_DURATION
+from app.metrics import (
+    MOVEMENT_TX_FAILURES,
+    MOVEMENTS_CREATED,
+    OUTBOX_EVENTS_WRITTEN,
+    REQUEST_DURATION,
+)
 
 logging.basicConfig(level=logging.INFO)
 
@@ -64,9 +70,16 @@ def readyz():
 
 @app.post("/movements", status_code=201)
 def create_movement(movement: MovementIn):
-    record = db.insert_movement(movement.sku, movement.quantity, movement.warehouse)
+    # Movement + Outbox-Event committen gemeinsam (db.insert_movement). Erfolgs-
+    # metriken erst NACH dem Commit; bei Rollback nur die niedrig-kardinale
+    # Fehler-Metrik. Keine Queue-Kommunikation, keine IDs/Payloads als Labels.
+    try:
+        record = db.insert_movement(movement.sku, movement.quantity, movement.warehouse)
+    except Exception:
+        MOVEMENT_TX_FAILURES.inc()
+        raise
     MOVEMENTS_CREATED.inc()
-    publish_movement(record)
+    OUTBOX_EVENTS_WRITTEN.inc()
     return record
 
 

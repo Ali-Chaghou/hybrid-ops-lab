@@ -18,6 +18,29 @@ Die drei Setup-Services laufen genau einmal und beenden mit Exit 0. Reihenfolge:
 Das Image wird aus dem **Repo-Root** gebaut (`context: ../..`, `dockerfile:
 apps/inventory/Dockerfile`) und enthaelt App, `migrations/` und `ops/`.
 
+## Transactional Outbox (ab Phase 2B)
+
+`POST /movements` schreibt seit Phase 2B **atomar** in einer einzigen
+PostgreSQL-Transaktion: genau eine Zeile in `stock_movements` UND genau ein
+passendes Event in `event_outbox`. Beide committen gemeinsam oder gar nicht —
+es gibt nach erfolgreichem Commit weder ein Movement ohne Event noch umgekehrt.
+Die Datenbank erzwingt diese 1-zu-1-Beziehung selbst (zusammengesetzter FK plus
+ein rueckwaerts gerichteter `DEFERRABLE INITIALLY DEFERRED` FK), nicht die App.
+
+`event_outbox` ist die **dauerhafte Uebergabegrenze** zwischen site-dc und dem
+spaeteren Event-Flow. Der Request-Pfad macht **keine** Netzwerk-/Queue-Operation;
+`inventory_app` besitzt auf `event_outbox` **nur spaltenbezogenes INSERT** auf die
+Producer-Spalten (`event_id, movement_id, event_type, schema_version,
+occurred_at, source, payload`) — kein SELECT/UPDATE/DELETE. Die operativen
+Status-, Retry- und Publish-Spalten (`status`, `attempt_count`, `available_at`,
+`created_at`, `published_at`, `last_error`) bleiben der spaeteren Publisher-Rolle
+vorbehalten und kommen beim Insert aus ihren Defaults. Fuer die Publisher-Abfrage
+traegt die pending-Outbox einen **partiellen Index** auf
+`(available_at, created_at, event_id) WHERE status = 'pending'`. Der **Publisher
+bleibt in Phase 2B deaktiviert** — Queue (ElasticMQ/SQS), Toxiproxy und die
+Consumer-Verkabelung folgen erst in Phase 3 (eine getrennte, lesende/
+archivierende Rolle inklusive).
+
 ## Voraussetzungen
 
 Docker Engine inkl. Compose-Plugin. Auf einem frischen Ubuntu-Host installiert das
@@ -95,7 +118,7 @@ Runtime. Der Stack kommt deterministisch aus dem Nichts hoch.
 |---|---|---|
 | GET | `/healthz` | Liveness (prueft nichts) |
 | GET | `/readyz` | Readiness (prueft DB-Verbindung) |
-| POST | `/movements` | Lagerbewegung anlegen |
+| POST | `/movements` | Lagerbewegung + Outbox-Event atomar anlegen (201) |
 | GET | `/movements` | Bewegungen lesen |
 | GET | `/metrics` | Prometheus-Exposition |
 
