@@ -1,8 +1,9 @@
 """Postgres-Zugriff via psycopg3 mit Connection-Pool (synchron).
 
 Synchrone Handler laufen in FastAPIs Threadpool — bewusst einfach.
-Schema wird idempotent beim Start angelegt; produktiv uebernaehmen das
-Migrationen (Flyway/alembic) — fuer das Lab reicht CREATE TABLE IF NOT EXISTS.
+Das Schema wird NICHT mehr aus der Runtime erzeugt; es kommt ausschliesslich aus
+den versionierten Migrationen (apps/inventory/migrations). Beim Start prueft die
+App nur die Schema-Version (check_schema) und fuehrt keine DDL aus.
 """
 from __future__ import annotations
 
@@ -19,29 +20,52 @@ pool = ConnectionPool(
     open=False,
 )
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS stock_movements (
-    id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    sku         TEXT        NOT NULL,
-    quantity    INTEGER     NOT NULL,
-    warehouse   TEXT        NOT NULL,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-"""
+# Dem Inventory-Service bekannte Migrationen; EXPECTED = erwarteter Endstand.
+KNOWN_MIGRATIONS = ("0001_create_stock_movements", "0002_add_stable_event_id")
+EXPECTED_MIGRATION = KNOWN_MIGRATIONS[-1]
 
 
-def ensure_schema() -> None:
+class SchemaNotReadyError(RuntimeError):
+    """Schema nicht vorbereitet oder unbekannt neu — die App darf nicht starten."""
+
+
+def check_schema() -> None:
+    """Reine Schema-Pruefung beim Start — KEINE DDL, keine Reparatur, keine DSN-Ausgabe.
+
+    Verweigert den Start bei fehlendem, zu altem oder unbekannt neuerem Schema.
+    Die versionierten Migrationen muessen vorher ausgefuehrt worden sein.
+    """
     with pool.connection() as conn:
-        conn.execute(SCHEMA)
+        try:
+            rows = conn.execute("SELECT version FROM schema_migrations").fetchall()
+        except Exception:
+            raise SchemaNotReadyError(
+                "Das Datenbankschema ist nicht vorbereitet. Fuehre die versionierten "
+                "Migrationen vor dem Start der Anwendung aus."
+            ) from None
+        applied = {r["version"] for r in rows}
+        if EXPECTED_MIGRATION not in applied:
+            raise SchemaNotReadyError(
+                "Das Datenbankschema ist nicht vorbereitet. Fuehre die versionierten "
+                "Migrationen vor dem Start der Anwendung aus."
+            )
+        unknown = applied - set(KNOWN_MIGRATIONS)
+        if unknown:
+            raise SchemaNotReadyError(
+                "Unbekannter, neuerer Schemastand erkannt: " + ", ".join(sorted(unknown))
+                + ". Die Anwendung ist fuer diesen Stand nicht freigegeben."
+            )
 
 
 def insert_movement(sku: str, quantity: int, warehouse: str) -> dict:
+    # event_id ist additiv (neues Feld, persistiert per Default); bestehende Felder
+    # bleiben unveraendert. Noch KEIN Event-Publishing — nur Rueckgabe der Zeile.
     with pool.connection() as conn:
         return conn.execute(
             """
             INSERT INTO stock_movements (sku, quantity, warehouse)
             VALUES (%s, %s, %s)
-            RETURNING id, sku, quantity, warehouse, created_at
+            RETURNING id, sku, quantity, warehouse, created_at, event_id
             """,
             (sku, quantity, warehouse),
         ).fetchone()
@@ -51,7 +75,7 @@ def list_movements(limit: int) -> list[dict]:
     with pool.connection() as conn:
         return conn.execute(
             """
-            SELECT id, sku, quantity, warehouse, created_at
+            SELECT id, sku, quantity, warehouse, created_at, event_id
             FROM stock_movements
             ORDER BY id DESC
             LIMIT %s

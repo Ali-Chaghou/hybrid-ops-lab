@@ -1,0 +1,3 @@
+# Nur fuer Tests (nicht im Laufzeit-Image). psycopg ist bereits Runtime-Dep.
+-r requirements.txt
+pytest~=9.1

@@ -57,7 +57,6 @@ jobs:
   iac-quality:
     name: IaC docs, lint & security
     runs-on: ubuntu-latest
-    if: ${{ hashFiles('infra/**/*.tf') != '' }}
 
     steps:
       - name: Checkout
