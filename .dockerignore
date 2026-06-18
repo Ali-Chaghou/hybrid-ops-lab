@@ -1,0 +1,23 @@
+# Build-Kontext ist das Repo-Root (Inventory-Image). Sensibles und Unnoetiges
+# bewusst ausschliessen — insbesondere infra/ (enthaelt *.tfvars / Secrets) und VCS.
+.git
+.github
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+**/.pytest_cache/
+.venv/
+venv/
+
+# IaC + Secrets gehoeren NICHT in den Image-Build-Kontext.
+infra/
+
+# Grosse Doku-Assets / Monitoring / andere Sites werden vom Inventory-Image nicht benoetigt.
+docs/
+monitoring/
+sites/cloud/
+
+# lokale Umgebungs-/Secret-Dateien
+**/.env
+**/*.tfvars
+make.env

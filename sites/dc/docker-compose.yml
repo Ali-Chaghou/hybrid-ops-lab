@@ -1,9 +1,18 @@
 name: hol-site-dc
 
+# Startreihenfolge (One-Shot-Setup vor der Runtime):
+#   db (healthy)
+#     -> db-bootstrap            (Cluster-Admin: Rollen idempotent anlegen)
+#       -> db-prepare            (Cluster-Admin: Inventory-DB + Owner inventory_admin)
+#         -> inventory-migrate   (inventory_admin: versionierte Migrationen)
+#           -> inventory         (inventory_app: Runtime, nur Least-Privilege)
+# Die Setup-Services laufen genau einmal und beenden mit Exit 0 (restart: "no").
+
 services:
   db:
     image: postgres:16-alpine
     environment:
+      # Cluster-Admin (Superuser) — ausschliesslich fuer Bootstrap/Prepare.
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
@@ -16,20 +25,74 @@ services:
       retries: 10
     restart: unless-stopped
 
-  inventory:
-    build: ../../apps/inventory
-    image: inventory:dev
+  # Gemeinsames Image (Setup + Runtime), gebaut aus dem Repo-Root.
+  db-bootstrap:
+    build:
+      context: ../..
+      dockerfile: apps/inventory/Dockerfile
+    image: hol-inventory:dev
+    command: ["python", "-m", "ops.db.bootstrap"]
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      PG_ADMIN_DSN: "host=db port=5432 user=${POSTGRES_USER} password=${POSTGRES_PASSWORD} dbname=${POSTGRES_DB}"
+      INVENTORY_ADMIN_PASSWORD: ${INVENTORY_ADMIN_PASSWORD}
+      INVENTORY_APP_PASSWORD: ${INVENTORY_APP_PASSWORD}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  db-prepare:
+    image: hol-inventory:dev
+    command: ["python", "-m", "ops.db.prepare"]
+    environment:
+      PG_ADMIN_DSN: "host=db port=5432 user=${POSTGRES_USER} password=${POSTGRES_PASSWORD} dbname=${POSTGRES_DB}"
+      INVENTORY_DB: ${INVENTORY_DB}
+      INVENTORY_DB_OWNER: inventory_admin
+    depends_on:
+      db:
+        condition: service_healthy
+      db-bootstrap:
+        condition: service_completed_successfully
+    restart: "no"
+
+  inventory-migrate:
+    image: hol-inventory:dev
+    command: ["python", "-m", "ops.db.migrate", "--migrations-dir", "/app/migrations"]
+    environment:
+      # Migrationen laufen als inventory_admin; DSN ueber ENV (nicht als CLI-Arg).
+      DATABASE_URL: "host=db port=5432 user=inventory_admin password=${INVENTORY_ADMIN_PASSWORD} dbname=${INVENTORY_DB}"
+    depends_on:
+      db:
+        condition: service_healthy
+      db-prepare:
+        condition: service_completed_successfully
+    restart: "no"
+
+  inventory:
+    image: hol-inventory:dev
+    environment:
+      # Runtime AUSSCHLIESSLICH als inventory_app — kein PG_ADMIN_DSN, kein Admin-Passwort.
+      DATABASE_URL: "host=db port=5432 user=inventory_app password=${INVENTORY_APP_PASSWORD} dbname=${INVENTORY_DB}"
       EVENTS_ENABLED: ${EVENTS_ENABLED:-false}
       SQS_ENDPOINT_URL: ${SQS_ENDPOINT_URL:-}
       SQS_QUEUE_URL: ${SQS_QUEUE_URL:-}
       AWS_REGION: ${AWS_REGION:-eu-central-1}
     ports:
-      - "8000:8000"
+      # Host-Port parametrisierbar, damit der isolierte Smoke-Test nicht mit dem
+      # normalen Stack (8000) kollidiert.
+      - "${INVENTORY_HOST_PORT:-8000}:8000"
+    healthcheck:
+      # Keine curl-Abhaengigkeit im Image -> Python-urllib gegen /readyz.
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/readyz',timeout=3).status==200 else 1)\""]
+      interval: 5s
+      timeout: 4s
+      retries: 12
+      start_period: 5s
     depends_on:
       db:
         condition: service_healthy
+      inventory-migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   node_exporter:

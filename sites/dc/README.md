@@ -6,39 +6,66 @@ Standort "Rechenzentrum" des hybrid-ops-lab. Bildet eine klassische On-Prem-Umge
 
 | Service | Image | Zweck |
 |---|---|---|
-| `inventory` | lokal gebaut (`apps/inventory`) | REST-API, persistiert Lagerbewegungen, exponiert `/metrics` |
-| `db` | `postgres:16-alpine` | Datenhaltung fuer `inventory` |
+| `db` | `postgres:16-alpine` | Datenhaltung; Cluster-Admin nur fuer Setup |
+| `db-bootstrap` | `hol-inventory:dev` (One-Shot) | legt die Rollen idempotent an (`ops.db.bootstrap`) |
+| `db-prepare` | `hol-inventory:dev` (One-Shot) | erstellt die Inventory-DB, Owner `inventory_admin` (`ops.db.prepare`) |
+| `inventory-migrate` | `hol-inventory:dev` (One-Shot) | versionierte Migrationen als `inventory_admin` (`ops.db.migrate`) |
+| `inventory` | `hol-inventory:dev` | REST-API als Least-Privilege-Rolle `inventory_app`, exponiert `/metrics` |
 | `node_exporter` | `quay.io/prometheus/node-exporter:v1.11.1` | Host-Metriken (CPU, RAM, Disk) fuer Prometheus |
+
+Die drei Setup-Services laufen genau einmal und beenden mit Exit 0. Reihenfolge:
+`db` (healthy) → `db-bootstrap` → `db-prepare` → `inventory-migrate` → `inventory`.
+Das Image wird aus dem **Repo-Root** gebaut (`context: ../..`, `dockerfile:
+apps/inventory/Dockerfile`) und enthaelt App, `migrations/` und `ops/`.
 
 ## Voraussetzungen
 
-Docker Engine inkl. Compose-Plugin. Auf einem frischen Ubuntu-Host installiert das Bootstrap-Skript beides aus dem offiziellen Docker-Repo und zieht den Stack hoch:
+Docker Engine inkl. Compose-Plugin. Auf einem frischen Ubuntu-Host installiert das
+Bootstrap-Skript beides aus dem offiziellen Docker-Repo, **erzeugt beim ersten Lauf
+eine geschuetzte `.env` (Modus 600) mit kryptografisch zufaelligen lokalen
+Passwoertern**, validiert die Compose-Konfiguration (`config --quiet`) und zieht den
+Stack hoch:
 
     sudo ./ops/bootstrap/setup-site-dc.sh
 
+Eine **bestehende `.env` bleibt unveraendert** (keine Rotation, kein Ueberschreiben).
 Das Skript ist idempotent, mehrfach ausfuehrbar.
 
 ## Konfiguration
 
-Alle Werte kommen aus `.env` (12-factor). Vorlage ist `.env.example`; die echte `.env` ist gitignored.
+Alle Werte kommen aus `.env` (12-factor). Die echte `.env` ist gitignored und wird
+vom Bootstrap-Skript mit Zufallspasswoertern erzeugt. `.env.example` ist **nur eine
+manuell nutzbare Vorlage** (oeffentliche Beispielwerte) und wird **nicht** automatisch
+als aktive `.env` kopiert. Ohne Bootstrap legt man die `.env` manuell an und setzt
+echte Werte — keine von `ops.db.bootstrap` abgelehnten Platzhalter (z. B. `change-me`).
 
-    cp .env.example .env
+| Variable | Bedeutung |
+|---|---|
+| `POSTGRES_USER` / `_PASSWORD` / `_DB` | Cluster-Admin (Superuser) + Maintenance-DB — nur Bootstrap/Prepare |
+| `INVENTORY_DB` | Name der Inventory-Datenbank (von `db-prepare` angelegt) |
+| `INVENTORY_ADMIN_PASSWORD` | Passwort der Rolle `inventory_admin` (Migrationen + Ownership) |
+| `INVENTORY_APP_PASSWORD` | Passwort der Rolle `inventory_app` (Runtime, Least-Privilege) |
+| `INVENTORY_HOST_PORT` | Host-Port-Mapping der App (Default `8000`) |
+| `EVENTS_ENABLED` | SQS-Publish an/aus (ab Phase 3; Default `false`) |
+| `SQS_ENDPOINT_URL` / `SQS_QUEUE_URL` | Queue-Endpoint/-URL (Phase 3 = Toxiproxy-Adresse) |
+| `AWS_REGION` | Region fuer den SQS-Client |
 
-| Variable | Default | Bedeutung |
-|---|---|---|
-| `POSTGRES_USER` / `_PASSWORD` / `_DB` | — | Datenbank-Zugang |
-| `EVENTS_ENABLED` | `false` | SQS-Publish an/aus (ab Phase 3) |
-| `SQS_ENDPOINT_URL` | leer | Queue-Endpoint (Phase 3 = Toxiproxy-Adresse) |
-| `AWS_REGION` | `eu-central-1` | Region fuer den SQS-Client |
-
-Kein Endpoint ist hartkodiert — das Queue-Ziel ist eine Variable und damit austauschbar.
+**Die Inventory-Runtime erhaelt weder `PG_ADMIN_DSN` noch das `inventory_admin`-
+Passwort** — nur eine `DATABASE_URL` fuer `inventory_app`.
 
 ## Deploy
 
     docker compose --env-file .env up -d --build
 
-`inventory` startet erst, wenn `db` den Healthcheck besteht
-(`depends_on: condition: service_healthy`) — kein Start-Race.
+Compose faehrt die Setup-Kette deterministisch durch: `db-bootstrap` →
+`db-prepare` → `inventory-migrate` (je `service_completed_successfully`), dann
+`inventory` (erst nach erfolgreicher Migration). Die App fuehrt **keine** DDL aus;
+sie prueft beim Start nur die Schema-Version (`db.check_schema()`).
+
+Reproduzierbarer, isolierter Smoke-Test (eigener Compose-Projektname, frisches
+Volume, Cleanup per `trap`):
+
+    ./sites/dc/smoke-test.sh
 
 ## Testen
 
@@ -58,8 +85,9 @@ Dieselben Checks laufen automatisiert in der CI
     docker compose --env-file .env down -v    # inkl. pgdata-Volume -> Clean-Slate
     docker compose --env-file .env up -d --build
 
-Nach `down -v` ist die DB leer; das Schema legt sich beim Start idempotent neu an.
-Der Stack kommt reproduzierbar aus dem Nichts hoch.
+Nach `down -v` ist die DB leer. Beim naechsten `up` baut die Setup-Kette
+(Bootstrap → Prepare → Migrate) das Schema reproduzierbar neu auf — **nicht** die
+Runtime. Der Stack kommt deterministisch aus dem Nichts hoch.
 
 ## Endpunkte
 
@@ -73,8 +101,9 @@ Der Stack kommt reproduzierbar aus dem Nichts hoch.
 
 ## Betriebshinweise
 
-- Build-Kontext der App liegt in `apps/inventory/` (Dockerfile, requirements.txt,
-  .dockerignore dort, nicht eine Ebene hoeher) — sonst findet `compose build` kein Dockerfile.
+- Build-Kontext ist das **Repo-Root** (`context: ../..`), damit ein gemeinsames Image
+  App, `migrations/` und `ops/` enthaelt. Ein `.dockerignore` im Repo-Root schliesst
+  Sensibles aus (insbesondere `infra/` mit `*.tfvars`) und haelt den Kontext klein.
 - "Container gestartet" heisst nicht "App bereit": uvicorn + Lifespan (Pool, Schema)
   brauchen einen Moment. Deshalb `/readyz` und in der CI eine Readiness-Schleife statt `sleep`.
 - `node_exporter` laeuft mit `network_mode: host` / `pid: host` (read-only Root-Mount) —

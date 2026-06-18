@@ -52,14 +52,54 @@ if [[ -n "${TARGET_USER}" ]]; then
 fi
 
 # --- 5. .env sicherstellen ---
+# Robuste Zufallspasswoerter: head liest /dev/urandom direkt (bounded) -> kein
+# SIGPIPE durch einen Infinite-Stream-in-Pipe; Reduktion auf alnum via Bash
+# (kein zweiter Pipe-Konsument). Kryptografisch ausreichend (144 Bit Entropie).
+gen_pw() {
+  local raw
+  raw="$(head -c 18 /dev/urandom | base64)"
+  raw="${raw//[^A-Za-z0-9]/}"
+  printf '%s' "${raw}"
+}
+
 if [[ ! -f "${SITE_DIR}/.env" ]]; then
-  log ".env aus .env.example erzeugen (Platzhalterwerte)"
-  cp "${SITE_DIR}/.env.example" "${SITE_DIR}/.env"
+  log "Erzeuge geschuetzte .env mit zufaelligen lokalen Passwoertern (Modus 600)"
+  # .env.example wird NIE als aktive .env kopiert (oeffentlich bekannte Beispielwerte).
+  umask 077
+  cat > "${SITE_DIR}/.env" <<EOF
+POSTGRES_USER=hol_admin
+POSTGRES_PASSWORD=$(gen_pw)
+POSTGRES_DB=postgres
+INVENTORY_DB=inventory
+INVENTORY_ADMIN_PASSWORD=$(gen_pw)
+INVENTORY_APP_PASSWORD=$(gen_pw)
+INVENTORY_HOST_PORT=8000
+EVENTS_ENABLED=false
+SQS_ENDPOINT_URL=
+SQS_QUEUE_URL=
+AWS_REGION=eu-central-1
+EOF
+  chmod 600 "${SITE_DIR}/.env"
+  # Eigentum an den aufrufenden Nutzer, damit er die .env spaeter verwalten kann.
+  # Primaere Gruppe robust ermitteln (nicht hardcoden, nicht == Username annehmen).
+  if [[ -n "${TARGET_USER}" ]]; then
+    TARGET_GROUP="$(id -gn "${TARGET_USER}")"
+    chown "${TARGET_USER}:${TARGET_GROUP}" "${SITE_DIR}/.env"
+  fi
+else
+  log "Bestehende .env bleibt unveraendert (keine Rotation, kein Ueberschreiben)"
 fi
 
-# --- 6. Stack hochziehen ---
-log "Starte site-dc-Stack"
+# --- 6. Compose-Konfiguration validieren (kein Secret-Output: --quiet) ---
 cd "${SITE_DIR}"
+log "Validiere Compose-Konfiguration"
+if ! docker compose --env-file .env config --quiet; then
+  echo "[setup-site-dc] Compose-Konfiguration ungueltig — Abbruch." >&2
+  exit 1
+fi
+
+# --- 7. Stack hochziehen ---
+log "Starte site-dc-Stack"
 docker compose --env-file .env up -d --build
 
 log "Fertig. Status:"

@@ -14,6 +14,7 @@ Credentials werden nicht ausgegeben.
 from __future__ import annotations
 
 import argparse
+import os
 import pathlib
 import sys
 
@@ -84,10 +85,16 @@ def run(database_url: str, migrations_dir: str | pathlib.Path) -> list[str]:
 
 def _main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description="Apply versioned SQL migrations.")
-    ap.add_argument("--database-url", required=True)
+    # Optional: ohne --database-url wird DATABASE_URL aus der Umgebung genommen,
+    # damit das Passwort NICHT als CLI-Argument im Process-Listing erscheint.
+    ap.add_argument("--database-url", default=None)
     ap.add_argument("--migrations-dir", required=True)
     args = ap.parse_args(argv)
-    applied = run(args.database_url, args.migrations_dir)
+    database_url = args.database_url or os.environ.get("DATABASE_URL")
+    if not database_url:
+        print("error: provide --database-url or set DATABASE_URL", file=sys.stderr)
+        return 2
+    applied = run(database_url, args.migrations_dir)
     print("applied:", ", ".join(applied) if applied else "(up to date)")
     return 0
 
