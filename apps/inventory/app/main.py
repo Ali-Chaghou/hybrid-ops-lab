@@ -30,7 +30,7 @@ class MovementIn(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.pool.open()
-    db.ensure_schema()
+    db.check_schema()  # keine DDL beim Start; nur Schema-Version pruefen
     yield
     db.pool.close()
 
