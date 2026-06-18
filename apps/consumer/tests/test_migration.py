@@ -5,11 +5,34 @@ import pathlib
 
 import psycopg
 import pytest
+from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 from ops.db import migrate
 from app.store import SchemaVersionError, check_schema_version
 
 CONSUMER_MIGRATIONS = pathlib.Path(__file__).resolve().parents[1] / "migrations"
 INVENTORY_MIGRATIONS = pathlib.Path(__file__).resolve().parents[3] / "apps/inventory/migrations"
+
+
+def _insert_movement_with_outbox(conn, sku, quantity, warehouse):
+    """Fuegt Movement + passendes Outbox-Event in EINER Transaktion ein (ab 0003 Pflicht).
+
+    Gibt die event_id des Movements zurueck. conn ist NICHT autocommit.
+    """
+    with conn.transaction():
+        row = conn.execute(
+            "INSERT INTO stock_movements (sku, quantity, warehouse) "
+            "VALUES (%s,%s,%s) RETURNING id, event_id, created_at",
+            (sku, quantity, warehouse),
+        ).fetchone()
+        conn.execute(
+            "INSERT INTO event_outbox (event_id, movement_id, event_type, schema_version, "
+            "occurred_at, source, payload) VALUES (%s,%s,'inventory.movement.recorded',1,%s,"
+            "'inventory-service',%s)",
+            (str(row["event_id"]), row["id"], row["created_at"],
+             Jsonb({"movement_id": row["id"], "sku": sku, "quantity": quantity, "warehouse": warehouse})),
+        )
+    return row["event_id"]
 
 
 def test_consumer_clean_migration_creates_tables(consumer_db):
@@ -63,11 +86,19 @@ def test_check_schema_version_rejects_unknown_newer(consumer_db):
 
 
 def test_inventory_clean_install(db_factory):
-    # Leere Datenbank (KEIN stock_movements) -> beide Migrationen -> vollstaendiges Schema.
+    # Leere Datenbank (KEIN stock_movements) -> alle Migrationen -> vollstaendiges Schema.
     admin, app, _name = db_factory("inventory_admin", "inventory_app")
     applied = migrate.run(admin, INVENTORY_MIGRATIONS)
-    assert applied == ["0001_create_stock_movements", "0002_add_stable_event_id"]
+    assert applied == [
+        "0001_create_stock_movements",
+        "0002_add_stable_event_id",
+        "0003_create_event_outbox",
+    ]
     with psycopg.connect(admin) as c:
+        tabs = {r[0] for r in c.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema='public'"
+        ).fetchall()}
+        assert {"stock_movements", "event_outbox", "schema_migrations"} <= tabs
         cols = {r[0] for r in c.execute(
             "SELECT column_name FROM information_schema.columns WHERE table_name='stock_movements'"
         ).fetchall()}
@@ -77,15 +108,25 @@ def test_inventory_clean_install(db_factory):
             "WHERE table_name='stock_movements' AND column_name='event_id'"
         ).fetchone()[0]
         assert notnull == "NO"
-    # Runtime-Rolle darf ein Movement einfuegen (event_id kommt per Default).
-    with psycopg.connect(app, autocommit=True) as c:
-        eid = c.execute(
-            "INSERT INTO stock_movements (sku, quantity, warehouse) VALUES ('X',1,'W') RETURNING event_id"
-        ).fetchone()[0]
+    # Runtime-Rolle darf ein Movement + sein Outbox-Event einfuegen (ab 0003 atomar).
+    with psycopg.connect(app, row_factory=dict_row) as c:
+        eid = _insert_movement_with_outbox(c, "X", 1, "W")
         assert eid is not None
-        # ...aber keine DDL.
+    # ...aber keine DDL.
+    with psycopg.connect(app, autocommit=True) as c:
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             c.execute("CREATE TABLE evil (i int)")
+
+
+def test_inventory_second_migration_run_is_noop(db_factory):
+    # Zweiter Lauf auf bereits migrierter DB: nichts Neues, keine Nebenwirkungen.
+    admin, _app, _name = db_factory("inventory_admin", "inventory_app")
+    migrate.run(admin, INVENTORY_MIGRATIONS)
+    again = migrate.run(admin, INVENTORY_MIGRATIONS)
+    assert again == []
+    with psycopg.connect(admin) as c:
+        n = c.execute("SELECT count(*) FROM schema_migrations").fetchone()[0]
+        assert n == 3
 
 
 def test_failed_migration_not_marked_applied(db_factory, tmp_path):
@@ -118,23 +159,22 @@ def test_inventory_migration_backfills_distinct_event_ids(inventory_old_db):
 def test_inventory_migration_sets_default_for_new_rows(inventory_old_db):
     admin = inventory_old_db["admin"]
     migrate.run(admin, INVENTORY_MIGRATIONS)  # leeres Schema (keine Zeilen)
-    with psycopg.connect(admin, autocommit=True) as c:
-        row = c.execute(
-            "INSERT INTO stock_movements (sku, quantity, warehouse) VALUES ('X',1,'W') RETURNING event_id"
-        ).fetchone()
-        # zweite Zeile: andere event_id (Default greift pro Insert)
-        row2 = c.execute(
-            "INSERT INTO stock_movements (sku, quantity, warehouse) VALUES ('Y',1,'W') RETURNING event_id"
-        ).fetchone()
-    assert row[0] is not None and row2[0] is not None and row[0] != row2[0]
+    with psycopg.connect(admin, row_factory=dict_row) as c:
+        # Default-event_id greift pro Insert -> zwei Zeilen, zwei verschiedene UUIDs.
+        eid1 = _insert_movement_with_outbox(c, "X", 1, "W")
+        eid2 = _insert_movement_with_outbox(c, "Y", 1, "W")
+    assert eid1 is not None and eid2 is not None and eid1 != eid2
 
 
 def test_inventory_migration_adds_unique_constraint(inventory_old_db):
     admin = inventory_old_db["admin"]
     migrate.run(admin, INVENTORY_MIGRATIONS)
-    with psycopg.connect(admin, autocommit=True) as c:
-        eid = c.execute(
-            "INSERT INTO stock_movements (sku, quantity, warehouse) VALUES ('X',1,'W') RETURNING event_id"
-        ).fetchone()[0]
+    with psycopg.connect(admin, row_factory=dict_row) as c:
+        eid = _insert_movement_with_outbox(c, "X", 1, "W")
+        # Dieselbe event_id explizit erneut -> Unique-Index auf event_id feuert beim Insert.
         with pytest.raises(psycopg.errors.UniqueViolation):
-            c.execute("INSERT INTO stock_movements (sku, quantity, warehouse, event_id) VALUES ('Z',1,'W',%s)", (eid,))
+            with c.transaction():
+                c.execute(
+                    "INSERT INTO stock_movements (sku, quantity, warehouse, event_id) "
+                    "VALUES ('Z',1,'W',%s)", (eid,)
+                )

@@ -125,13 +125,33 @@ def make_inventory_db(pg_server):
 
 @pytest.fixture
 def run_lifespan():
-    """Startet den echten Inventory-Lifespan im Subprozess (Inventory-Runtime)."""
-    def run(app_dsn: str, driver: str = _DRIVER):
+    """Startet den echten Inventory-Lifespan im Subprozess (Inventory-Runtime).
+
+    Optionale `args` werden als sys.argv[1:] an den Treiber gereicht (z. B. der
+    Fault-Punkt fuer den Rollback-Nachweis).
+    """
+    def run(app_dsn: str, driver: str = _DRIVER, args: tuple[str, ...] = ()):
         env = {**os.environ, "DATABASE_URL": app_dsn, "PYTHONPATH": str(INV_ROOT),
                "EVENTS_ENABLED": "false"}
-        return subprocess.run([sys.executable, "-c", driver], env=env,
+        return subprocess.run([sys.executable, "-c", driver, *args], env=env,
                               capture_output=True, text=True, timeout=60)
     return run
+
+
+@pytest.fixture
+def admin_conn(pg_server):
+    """Kontextmanager-Factory fuer eine psycopg-Verbindung als inventory_admin.
+
+    Verifikation im Testprozess laeuft ueber rohes SQL — die Inventory-Runtime
+    (app.db) wird NIE in den Testprozess importiert (Service-Isolation)."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def connect(db):
+        with psycopg.connect(db["admin"], autocommit=True) as conn:
+            yield conn
+
+    return connect
 
 
 @pytest.fixture
