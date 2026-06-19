@@ -8,9 +8,9 @@ Reproduziert den Live-Ist-Zustand:
     NICHT Owner der Altobjekte.
 
 Beweist:
-  1. OHNE Ownership-Reassign scheitert die Migration (das diagnostizierte Problem).
-  2. MIT prepare + reassign + migrate laeuft das Upgrade sauber durch und
-     backfillt event_id (0002) und event_outbox (0003).
+  1. OHNE die Ownership-Uebertragung scheitert die Migration (das diagnostizierte Problem).
+  2. MIT prepare + gezielter Ownership-Uebertragung + migrate laeuft das Upgrade
+     sauber durch und backfillt event_id (0002) und event_outbox (0003).
 """
 from __future__ import annotations
 
@@ -78,10 +78,10 @@ def test_upgrade_without_reassign_fails(pg_server):
 def test_upgrade_with_reassign_succeeds_and_backfills(pg_server):
     legacy, name, admin_dsn, app_dsn, maint, _sock = _legacy_install(pg_server)
 
-    # Kontrollierte Upgrade-Reihenfolge: prepare -> reassign -> migrate.
+    # Kontrollierte Upgrade-Reihenfolge: prepare -> Ownership-Uebertragung -> migrate.
     assert prepare.ensure_database(maint, name, "inventory_admin") == "owner-corrected"
-    res = reassign.reassign_owned(maint, name, from_role=legacy, to_role="inventory_admin")
-    assert res["status"] == "reassigned" and res["objects_after"] == 0
+    res = reassign.transfer_ownership(maint, name, from_role=legacy, to_role="inventory_admin")
+    assert res["status"] == "transferred"
     applied = migrate.run(admin_dsn, INVENTORY_MIGRATIONS)
     assert applied == [
         "0001_create_stock_movements",

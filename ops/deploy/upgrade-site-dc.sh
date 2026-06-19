@@ -8,8 +8,9 @@
 #
 # Kernproblem: `db-prepare` setzt nur den DATENBANK-Owner. Bestehende Tabellen/
 # Sequenzen gehoeren weiter der Alt-Rolle, sodass die als inventory_admin laufenden
-# Migrationen an ALTER/GRANT scheitern. Schritt "reassign" uebertraegt die Objekte
-# kontrolliert (mit Allowlist) an inventory_admin.
+# Migrationen an ALTER/GRANT scheitern. Der Ownership-Schritt uebertraegt die Objekte
+# kontrolliert (Allowlist, gezielte ALTER ... OWNER — KEIN REASSIGN OWNED) an
+# inventory_admin. Phasenname dieses Schritts bleibt "reassign-done".
 #
 # Deployment-Quelle ist ein UNVERAENDERLICHES Release-Verzeichnis (RELEASE_DIR), das
 # aus einem freigegebenen Merge-Commit (EXPECTED_COMMIT) exportiert wurde. Das alte,
@@ -72,6 +73,43 @@ migration_started() {
   esac
 }
 
+# Robuster Pre-Migration-Rueckstart der ALTEN Runtime. Geteilter Helfer fuer den
+# automatischen Fehler-Handler (die) UND den dokumentierten manuellen Pfad
+# (rollback --restart-old). Startet AUSSCHLIESSLICH den bestehenden alten Container
+# ${PROJECT}-inventory-1 via 'docker start' — KEIN 'docker compose up'/'dc up', das
+# den Service mit dem NEUEN Phase-2B-Image neu erstellen koennte. Keine
+# Fehlerunterdrueckung mit '|| true'. Rueckgabe 0 = wiederhergestellt, 1 = manueller
+# Eingriff noetig.
+restart_old_runtime() {
+  local cname="${PROJECT}-inventory-1"
+  if ! docker inspect "$cname" >/dev/null 2>&1; then
+    log "Pre-Migration-Recovery FEHLGESCHLAGEN: Container ${cname} existiert nicht — manueller Eingriff noetig."
+    return 1
+  fi
+  log "Pre-Migration-Recovery: starte bestehenden alten Container ${cname} (docker start)"
+  if ! docker start "$cname" >/dev/null; then
+    log "Pre-Migration-Recovery FEHLGESCHLAGEN: 'docker start ${cname}' fehlgeschlagen — manueller Eingriff noetig."
+    return 1
+  fi
+  if [ "$(docker inspect -f '{{.State.Running}}' "$cname" 2>/dev/null)" != "true" ]; then
+    log "Pre-Migration-Recovery FEHLGESCHLAGEN: ${cname} laeuft nach 'docker start' nicht — manueller Eingriff noetig."
+    return 1
+  fi
+  # Bounded auf health=healthy warten. Hat das alte Image keinen Healthcheck
+  # (Status 'none'), gilt 'running' als Erfolg.
+  local st
+  for _ in $(seq 1 24); do
+    st="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cname" 2>/dev/null || echo none)"
+    case "$st" in
+      healthy) log "Pre-Migration-Recovery OK: ${cname} ist healthy."; return 0 ;;
+      none)    log "Pre-Migration-Recovery OK: ${cname} laeuft (kein Healthcheck im alten Image)."; return 0 ;;
+    esac
+    sleep 2
+  done
+  log "Pre-Migration-Recovery FEHLGESCHLAGEN: ${cname} wurde im Zeitfenster nicht healthy — manueller Eingriff noetig."
+  return 1
+}
+
 # Phasenabhaengiger Fehler-Abbruch. Startet die alte Runtime NUR vor Migrationsbeginn.
 die() {
   local msg="$1"
@@ -89,8 +127,10 @@ beim Commit scheitern. Optionen:
        "$0" rollback        (siehe docs/runbook-phase-2b-upgrade-site-dc.md)
 EOF
   else
-    log "Pre-Migration-Fehler -> sichere Wiederherstellung: alte Runtime (re)starten"
-    dc start inventory >/dev/null 2>&1 || true
+    log "Pre-Migration-Fehler -> sichere Wiederherstellung der alten Runtime"
+    if ! restart_old_runtime; then
+      printf '\n[upgrade-site-dc] Urspruenglicher Fehler bleibt bestehen; alte Runtime NICHT wiederhergestellt — MANUELLER EINGRIFF erforderlich.\n' >&2
+    fi
   fi
   exit 1
 }
@@ -345,10 +385,10 @@ rollout() {
   dc run --rm --no-deps db-prepare || die "db-prepare fehlgeschlagen"
   set_state prepare-done
 
-  log "SETUP 3/4: reassign (Altobjekte ${OLD_OWNER_ROLE} -> inventory_admin, mit Allowlist)"
+  log "SETUP 3/4: gezielte Ownership-Uebertragung (${OLD_OWNER_ROLE} -> inventory_admin, ALTER ... OWNER, kein REASSIGN OWNED)"
   dc run --rm --no-deps db-prepare \
     python -m ops.db.reassign --database "$INVENTORY_DB" --from-role "$OLD_OWNER_ROLE" \
-    || die "Ownership-Reassign fehlgeschlagen (vor Migration) — alte Runtime wird sicher gestartet"
+    || die "Ownership-Uebertragung fehlgeschlagen (vor Migration) — alte Runtime wird sicher gestartet"
   set_state reassign-done
 
   # --- Ab hier ist das Schema nach Erfolg Phase-2B und Pre-2B-inkompatibel. ---
@@ -549,12 +589,12 @@ EOF
   cat <<EOF
 
 Vor Migrationsbeginn (Phase: ${phase}). Die alte Runtime ist sicher rueckstartbar
-(Bootstrap/Prepare/Reassign sind fuer die als Superuser verbundene Pre-2B-App
+(Bootstrap/Prepare/Ownership-Uebertragung sind fuer die als Superuser verbundene Pre-2B-App
 neutral). Mit '--restart-old' wird automatisch zurueckgestartet.
 EOF
   if [ "$mode" = "--restart-old" ]; then
-    log "Sicherer Rueckstart: alte Runtime (re)starten"
-    dc start inventory >/dev/null 2>&1 || dc up -d --no-deps inventory || fail "Rueckstart fehlgeschlagen"
+    log "Sicherer Rueckstart: bestehenden alten Container starten (geteilter Helfer)"
+    restart_old_runtime || fail "Rueckstart der alten Runtime fehlgeschlagen — manueller Eingriff noetig"
     log "Alte Runtime laeuft wieder. Kein Schema wurde inkompatibel veraendert."
   fi
 }
