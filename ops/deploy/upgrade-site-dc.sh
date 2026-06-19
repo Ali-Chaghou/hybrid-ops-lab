@@ -47,6 +47,7 @@ ENV_FILE="${ENV_FILE:-${RELEASE_DIR}/sites/dc/.env}"
 STATE_FILE="${STATE_FILE:-${RELEASE_DIR%/*}/.hol-upgrade-$(basename "$RELEASE_DIR").state}"
 
 INVENTORY_DB=""
+IMAGE_ID=""
 
 log()  { printf '\n[upgrade-site-dc] %s\n' "$*"; }
 fail() { printf '\n[upgrade-site-dc] FEHLER: %s\n' "$*" >&2; exit 1; }
@@ -286,13 +287,50 @@ PY
   log "PREFLIGHT bestanden. Fuer den Rollout (nach Freigabe): '$0 rollout'."
 }
 
+# --- Image-Inhalt verifizieren (nach Build, VOR Downtime) ---------------------
+# Vergleicht SHA256 der Release-Dateien mit ihren Kopien IM frisch gebauten Image
+# hol-inventory:dev. Pinnt auf die unveraenderliche Image-ID (nicht nur das Tag) und
+# liest die Image-Dateien in einem kurzlebigen --rm-Container (kein Stop/Restart
+# laufender Container). Bricht VOR jedem Downtime ab, wenn etwas fehlt/abweicht.
+_check_image_file() {
+  local host_rel="$1" img_path="$2" host_file host_sum img_sum
+  host_file="${RELEASE_DIR}/${host_rel}"
+  [ -f "$host_file" ] || die "Release-Datei fehlt: ${host_file}"
+  host_sum="$(sha256sum "$host_file" | cut -d' ' -f1)"
+  # Hash im Image via Python (Bestandteil des Images); fehlende Datei -> nonzero.
+  img_sum="$(docker run --rm --entrypoint python "$IMAGE_ID" -c \
+    "import hashlib; print(hashlib.sha256(open('${img_path}','rb').read()).hexdigest())" 2>/dev/null)" \
+    || die "Datei im Image fehlt/unlesbar: ${img_path} (Abbruch VOR Downtime)"
+  [ -n "$img_sum" ] || die "Kein Hash im Image fuer ${img_path}"
+  [ "$host_sum" = "$img_sum" ] \
+    || die "Image-Inhalt weicht ab: ${host_rel} != ${img_path} (Release != Image, Abbruch VOR Downtime)"
+  log "OK Image-Inhalt: ${host_rel} == ${img_path}"
+}
+
+verify_image_content() {
+  IMAGE_ID="$(docker image inspect -f '{{.Id}}' hol-inventory:dev 2>/dev/null)" \
+    || die "Image hol-inventory:dev nach Build nicht gefunden"
+  [ -n "$IMAGE_ID" ] || die "Konnte Image-ID von hol-inventory:dev nicht ermitteln"
+  log "Gebautes Image: hol-inventory:dev = ${IMAGE_ID}"
+  _check_image_file "ops/db/reassign.py"                                "/app/ops/db/reassign.py"
+  _check_image_file "apps/inventory/app/main.py"                        "/app/app/main.py"
+  _check_image_file "apps/inventory/migrations/0003_create_event_outbox.sql" "/app/migrations/0003_create_event_outbox.sql"
+  log "Image-Inhalt gegen Release verifiziert (3/3 Dateien, SHA256 identisch) — vor Downtime."
+}
+
 # --- Rollout: Zustandsmaschine ------------------------------------------------
 rollout() {
   preflight
   set_state preflight-ok
 
-  log "BUILD: Image hol-inventory:dev aus ${RELEASE_DIR} (kein Downtime)"
-  dc build inventory || die "Image-Build fehlgeschlagen"
+  # Das gemeinsame Image hol-inventory:dev wird ueber db-bootstrap gebaut — den
+  # EINZIGEN Service mit 'build:'-Sektion in der Compose-Datei. (Ein 'build inventory'
+  # haette mangels build:-Sektion ggf. ein altes Image stillschweigend wiederverwendet.)
+  log "BUILD: gemeinsames Image hol-inventory:dev via db-bootstrap aus ${RELEASE_DIR} (kein Downtime)"
+  dc build db-bootstrap || die "Image-Build fehlgeschlagen"
+  # Inhalt des frisch gebauten Images gegen die Release-Dateien verifizieren — VOR
+  # jedem Stop/Downtime. Bricht bei fehlender Datei oder Hash-Abweichung sofort ab.
+  verify_image_content
   set_state built
 
   log "STOP: alte Runtime kontrolliert anhalten (db bleibt online -> Downtime beginnt)"
