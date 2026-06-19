@@ -97,7 +97,7 @@ Die **Zustandsmaschine** (Statusdatei außerhalb des Worktrees) durchläuft:
 | Phase | Aktion | Pre-2B-Rückstart sicher? |
 |---|---|---|
 | `preflight-ok` | Herkunft/Backup/DB-Ist geprüft | ja |
-| `built` | Image gebaut (kein Downtime) | ja |
+| `built` | Image gebaut **und Image-Inhalt verifiziert** (kein Downtime) | ja |
 | `old-runtime-stopped` | alte Runtime gestoppt (Downtime beginnt) | ja |
 | `bootstrap-done` | Rollen angelegt | ja |
 | `prepare-done` | DB-Owner → inventory_admin | ja |
@@ -106,6 +106,25 @@ Die **Zustandsmaschine** (Statusdatei außerhalb des Worktrees) durchläuft:
 | `migrate-done` | 0001/0002/0003 angewandt | nein |
 | `runtime-up` | neue Runtime gestartet | nein |
 | `verified` / `complete` | Verifikation bestanden | nein |
+
+### Image-Build & -Verifikation (vor dem Downtime)
+
+Das gemeinsame Image `hol-inventory:dev` (Setup **und** Runtime) wird über den
+Service **`db-bootstrap`** gebaut — den **einzigen** Service mit `build:`-Sektion in
+`sites/dc/docker-compose.yml`. Der Service `inventory` referenziert das Image nur
+(`image: hol-inventory:dev`), hat **keine** `build:`-Sektion; ein `dc build
+inventory` würde daher nichts Buildbares treffen und könnte stillschweigend ein
+**altes** Image wiederverwenden. Deshalb: `dc build db-bootstrap`.
+
+**Unmittelbar nach dem Build, noch VOR jedem Stop/Downtime**, verifiziert der
+Rollout den Image-Inhalt gegen die freigegebenen Release-Dateien: SHA256-Vergleich
+für `ops/db/reassign.py` (→ `/app/ops/db/reassign.py`), `apps/inventory/app/main.py`
+(→ `/app/app/main.py`) und `apps/inventory/migrations/0003_create_event_outbox.sql`
+(→ `/app/migrations/0003_create_event_outbox.sql`). Die Prüfung pinnt auf die
+unveränderliche **Image-ID** (nicht nur das Tag, das geloggt wird), liest die
+Image-Dateien in einem kurzlebigen `--rm`-Container (kein Stop/Restart laufender
+Container) und **bricht vor dem Downtime ab**, falls eine Datei fehlt oder ein Hash
+abweicht. Erst danach wird Phase `built` gesetzt und die alte Runtime gestoppt.
 
 Die DB-Setup-Schritte laufen als kurzlebige `docker compose run --rm --no-deps`
 Container im selben Projekt/Volume; der `db`-Container wird **nie** neu erstellt.
