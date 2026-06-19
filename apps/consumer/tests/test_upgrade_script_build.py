@@ -59,3 +59,50 @@ def test_verification_pins_image_id_not_only_tag():
     # Verifikation pinnt auf die unveraenderliche Image-ID, nicht nur das Tag.
     assert "docker image inspect -f '{{.Id}}'" in TEXT
     assert 'docker run --rm --entrypoint python "$IMAGE_ID"' in TEXT
+
+
+# --- Pre-Migration-Recovery (robuster Rueckstart der alten Runtime) -----------
+
+
+def test_recovery_uses_docker_start_on_exact_old_container():
+    # Recovery startet AUSSCHLIESSLICH den bestehenden alten Container per name.
+    assert 'docker start "$cname"' in TEXT
+    assert 'cname="${PROJECT}-inventory-1"' in TEXT
+
+
+def test_recovery_has_no_silent_true_fallback():
+    # Kein stilles '|| true' im Recovery-Helfer oder im die()-Pre-Migration-Zweig.
+    assert "dc start inventory >/dev/null 2>&1 || true" not in TEXT
+    helper = TEXT[TEXT.index("restart_old_runtime() {"):TEXT.index("# Phasenabhaengiger Fehler-Abbruch")]
+    die_body = TEXT[TEXT.index("die() {"):TEXT.index("gen_pw() {")]
+    assert "|| true" not in helper
+    assert "|| true" not in die_body
+
+
+def test_recovery_never_uses_compose_up():
+    # Der Recovery-Helfer darf NIEMALS 'docker compose up' / 'dc up' verwenden.
+    helper = TEXT[TEXT.index("restart_old_runtime() {"):TEXT.index("# Phasenabhaengiger Fehler-Abbruch")]
+    assert "dc up" not in helper
+    assert "compose up" not in helper
+
+
+def test_recovery_waits_for_healthy():
+    helper = TEXT[TEXT.index("restart_old_runtime() {"):TEXT.index("# Phasenabhaengiger Fehler-Abbruch")]
+    assert ".State.Health.Status" in helper
+    assert "healthy)" in helper
+
+
+def test_die_uses_shared_recovery_helper_pre_migration():
+    # Der automatische Fehler-Handler nutzt denselben Helfer (geteilt).
+    assert "restart_old_runtime" in TEXT
+    die_body = TEXT[TEXT.index("die() {"):TEXT.index("gen_pw() {")]
+    assert "restart_old_runtime" in die_body
+
+
+def test_post_migration_failure_never_starts_old_runtime():
+    # Nach migrate-started: kein Pre-2B-Rueckstart; weder Helfer noch docker start.
+    die_body = TEXT[TEXT.index("die() {"):TEXT.index("gen_pw() {")]
+    started_branch = die_body[die_body.index("if migration_started; then"):die_body.index("else")]
+    assert "restart_old_runtime" not in started_branch
+    assert "docker start" not in started_branch
+    assert "KEIN automatischer Rueckstart" in started_branch
