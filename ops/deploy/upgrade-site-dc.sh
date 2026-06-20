@@ -56,10 +56,18 @@ fail() { printf '\n[upgrade-site-dc] FEHLER: %s\n' "$*" >&2; exit 1; }
 dc() { docker compose -p "$PROJECT" -f "$COMPOSE" --env-file "$ENV_FILE" "$@"; }
 
 admin_py() {
+  # NEWID wird per Pass-Through-Form (`-e NEWID` OHNE Wert) weitergereicht: docker
+  # compose uebernimmt den Wert aus der Umgebung des Aufrufs, falls gesetzt, und
+  # laesst die Variable sonst weg. Nur der POST-Atomaritaets-Check ruft als
+  # `NEWID="$newid" admin_py` auf und liest os.environ["NEWID"]; preflight/verify
+  # setzen NEWID nicht -> dort bleibt sie im Container schlicht unbelegt. Die
+  # Wert-lose Form referenziert keine ggf. ungesetzte Shell-Variable (sicher unter
+  # `set -u`) und gibt den Wert NICHT ins Log aus.
   dc run --rm --no-deps -T \
     -e CHECK_DB="$INVENTORY_DB" \
     -e EXPECTED_MIGRATIONS="$EXPECTED_MIGRATIONS" \
     -e OLD_OWNER_ROLE="$OLD_OWNER_ROLE" \
+    -e NEWID \
     db-prepare python -
 }
 
