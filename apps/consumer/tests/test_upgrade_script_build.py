@@ -106,3 +106,40 @@ def test_post_migration_failure_never_starts_old_runtime():
     assert "restart_old_runtime" not in started_branch
     assert "docker start" not in started_branch
     assert "KEIN automatischer Rueckstart" in started_branch
+
+
+# --- Phase-2B-Verify: NEWID-Weitergabe an den admin_py-Pruefcontainer ---------
+# Regression fuer den Verify-Harness-Bug: der POST-Atomaritaets-Check ruft als
+# `NEWID="$newid" admin_py` auf und liest os.environ["NEWID"], aber admin_py gab
+# NEWID nicht via `-e` an den Container weiter -> `KeyError: 'NEWID'`. Diese Tests
+# pruefen die Skript-QUELLE (kein Docker noetig) und schlagen ohne den Fix fehl.
+
+_ADMIN_PY_BODY = TEXT[TEXT.index("admin_py() {"):TEXT.index("# --- Zustandsmaschine")]
+
+
+def test_admin_py_forwards_newid_to_check_container():
+    # admin_py muss NEWID an den Pruefcontainer durchreichen (Wert-lose Form).
+    assert "-e NEWID" in _ADMIN_PY_BODY
+
+
+def test_post_atomicity_check_sets_newid_for_admin_py():
+    # Aufrufkontext: NEWID wird als Env-Prefix vor admin_py gesetzt ...
+    assert 'NEWID="$newid" admin_py' in TEXT
+    # ... und der Python-Check im Container liest sie aus der Umgebung.
+    assert 'os.environ["NEWID"]' in TEXT
+
+
+def test_newid_passed_as_value_less_passthrough_not_inlined():
+    # Pass-Through-Form (`-e NEWID` OHNE Wert): sicher unter `set -u` und der Wert
+    # taucht nicht in der Kommandozeile auf. Die Wert-Inline-Form ist unerwuenscht.
+    assert "-e NEWID=" not in _ADMIN_PY_BODY
+    assert "-e NEWID \\" in _ADMIN_PY_BODY
+
+
+def test_newid_value_is_never_logged():
+    # Der Movement-ID-Wert darf nicht ueber log/echo/printf ausgegeben werden.
+    for sink in ("log ", "echo ", "printf "):
+        assert f"{sink}$NEWID" not in TEXT
+        assert f'{sink}"$NEWID"' not in TEXT
+        assert f"{sink}$newid" not in TEXT
+        assert f'{sink}"$newid"' not in TEXT
