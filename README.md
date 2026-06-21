@@ -84,7 +84,8 @@ Totalausfall ab.
 
 ## Status
 
-Alle Phasen umgesetzt und auf den VMs verifiziert.
+Alle nachfolgend aufgeführten Basisphasen 1–7 wurden umgesetzt und in der
+Lab-Umgebung verifiziert.
 
 | Phase | Inhalt | Stand |
 |-------|--------|-------|
@@ -95,6 +96,30 @@ Alle Phasen umgesetzt und auf den VMs verifiziert.
 | 5 | Toxiproxy als Strecke, Incident-Szenario, Chaos-Skripte, Runbook | ✅ |
 | 6 | Monitoring: Prometheus, Grafana, Alertmanager, Blackbox | ✅ |
 | 7 | make-Orchestrierung beider Sites, README | ✅ |
+
+### Phase 2B — Transactional Outbox & kontrollierter site-dc-Upgrade (Gate A)
+
+Aufbauend auf dem Showcase wurde `site-dc` auf das **Transactional-Outbox-Muster**
+([ADR-006](docs/decisions/006-transactional-outbox.md)) gehoben: `POST /movements`
+schreibt Bewegung **und** Event atomar in einer PostgreSQL-Transaktion, statt im
+Request-Pfad an eine Queue zu publizieren. Das Upgrade einer **bestehenden**
+Installation lief kontrolliert und idempotent über
+[`ops/deploy/upgrade-site-dc.sh`](docs/runbook-phase-2b-upgrade-site-dc.md)
+(Preflight → Rollout → Resume).
+
+| Aspekt | Stand |
+|---|---|
+| Phase-2B-Migration (`0001`/`0002`/`0003`, `event_outbox` inkl. Backfill) | ✅ abgeschlossen |
+| Kontrollierter Rollout + Safe Resume (atomarer State, `flock`) | ✅ abgeschlossen |
+| **Gate A** (technisch und formal) | ✅ abgeschlossen |
+| Events (`EVENTS_ENABLED`) | ⏸️ deaktiviert (`false`) |
+| Outbox-Einträge | `pending` (kein Publish im HTTP-Request-Pfad) |
+| Publisher / Phase 3 (Outbox → Queue) | ⬜ noch nicht begonnen |
+
+Der bewiesene Live-Zustand, die erhaltene Fehlerhistorie und der ausgeführte
+Resume-Betriebsnachweis stehen im
+[Handoff Phase 2B / Gate A](docs/handoff-phase-2b-gate-a.md); der Resume-Pfad selbst
+im [Runbook](docs/runbook-phase-2b-upgrade-site-dc.md#resume--read-only-nachverifikation-und-state-abschluss).
 
 ## Schnellstart
 

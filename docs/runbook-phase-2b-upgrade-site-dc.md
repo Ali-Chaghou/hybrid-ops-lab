@@ -4,14 +4,23 @@ Kontrollierter, idempotenter Upgrade einer **bestehenden** site-dc-Installation 
 den Phase-2B-Stand (Migrationen 0001–0003, `event_outbox` inkl. Backfill).
 Orchestriert durch `ops/deploy/upgrade-site-dc.sh`.
 
-## Geltungsbereich / Ist-Zustand
+> All infrastructure names, roles, records and runtime evidence shown here belong
+> to an isolated synthetic lab environment and do not represent an employer,
+> customer or production system. Environment-specific paths are shown in
+> generalized form (`<release-root>`, `<state-root>`, `<backup-root>`,
+> `<source-root>`, `<legacy-working-copy>`).
+
+## Geltungsbereich / historischer Ausgangszustand vor Phase 2B
+
+Die folgenden Punkte beschreiben den vor dem Upgrade vorgefundenen Ausgangszustand.
+Der nachgewiesene aktuelle Zustand ist im Gate-A-Handoff dokumentiert.
 
 - Live-Compose-Projekt: `hol-site-dc`, PostgreSQL-Volume `hol-site-dc_pgdata`.
 - Bestehende DB `inventory`: Tabelle `stock_movements` (genau 1 Datensatz), **keine**
   `schema_migrations`, Owner = Alt-Rolle `inventory` (zugleich Cluster-Superuser).
 - Rollen `inventory_admin` / `inventory_app` existieren noch **nicht**.
-- Altes, schmutziges Live-Repo `/home/ops/hybrid-ops-lab` — wird **nie** beschrieben.
-- Geprüftes Backup: `/home/ops/backups/hybrid-ops-lab/20260618T222629Z`.
+- Pre-existing legacy working copy `<legacy-working-copy>` — wird **nie** beschrieben.
+- Geprüftes Backup: `<backup-root>/<backup-id>`.
 
 ## Kernproblem (warum ein reiner `up` scheitert)
 
@@ -56,10 +65,20 @@ abgedeckt — ohne Eingriff in geteilte/cluster-weite Objekte.
 
 ## Release-Prozess (Deployment-Quelle)
 
-> Die neuen Dateien (`ops/db/reassign.py`, `ops/deploy/upgrade-site-dc.sh`,
-> Tests, dieses Runbook) gehören **noch nicht** zum bestehenden Release `7cd85fc`.
-> Dieses Release bleibt unverändert. Es gibt **keinen** ausführbaren Pfad
+> **Historischer Hinweis (Stand vor PR #8):** Die Upgrade-Dateien
+> (`ops/db/reassign.py`, `ops/deploy/upgrade-site-dc.sh`, Tests, dieses Runbook)
+> gehörten zunächst **nicht** zum damaligen Release `7cd85fc`; dieses Release
+> blieb unverändert und hatte **keinen** ausführbaren Pfad
 > `…/releases/hybrid-ops-lab/7cd85fc/ops/deploy/upgrade-site-dc.sh`.
+>
+> **Aktueller Stand:** Die für Gate A freigegebene Implementierung basiert auf
+> `73e2ef96635ae9332a4dc43bdea61bffa0dc0a48` (Merge PR #8); das daraus erstellte
+> freigegebene, commitgebundene Release `<release-root>/<approved-release>` ist die
+> maßgebliche Deployment-Quelle. Das Phase-2B-Upgrade wurde über den `rollout` und
+> den abschließenden `resume` in der isolierten Lab-Umgebung kontrolliert
+> durchgeführt; der Rollout-State steht auf `complete` (siehe
+> [Handoff Phase 2B / Gate A](handoff-phase-2b-gate-a.md) und den Abschnitt
+> [Resume](#resume--read-only-nachverifikation-und-state-abschluss)).
 
 Korrekter Weg von der Änderung bis zur Deployment-Quelle:
 
@@ -67,11 +86,11 @@ Korrekter Weg von der Änderung bis zur Deployment-Quelle:
 2. **Commit + Push** erst nach Freigabe.
 3. **Pull Request** öffnen, **CI** durchlaufen lassen.
 4. **Merge nach `main`** → ergibt einen freigegebenen **Merge-Commit** `<NEW>`.
-5. Ein **unveränderliches Release-Verzeichnis** aus `<NEW>` erstellen, z. B.:
+5. Ein **freigegebenes, commitgebundenes Release-Verzeichnis** aus `<NEW>` erstellen, z. B.:
    ```bash
-   git -C /home/ops/src/hybrid-ops-lab fetch origin
-   git -C /home/ops/src/hybrid-ops-lab worktree add \
-       /home/ops/releases/hybrid-ops-lab/<NEW> <NEW>
+   git -C <source-root>/hybrid-ops-lab fetch origin
+   git -C <source-root>/hybrid-ops-lab worktree add \
+       <release-root>/<approved-release> <NEW>
    ```
    (oder `git archive <NEW> | tar -x -C …/<NEW>` für ein reines Snapshot).
 6. **Erst dieses neue Release** als Deployment-Quelle nutzen — `RELEASE_DIR` und
@@ -105,9 +124,9 @@ Der **Preflight** erzwingt diese Herkunft:
 ## Rollout-Reihenfolge
 
 ```bash
-RELEASE_DIR=/home/ops/releases/hybrid-ops-lab/<NEW>
+RELEASE_DIR=<release-root>/<approved-release>
 export RELEASE_DIR EXPECTED_COMMIT=<NEW> \
-       BACKUP_DIR=/home/ops/backups/hybrid-ops-lab/20260618T222629Z
+       BACKUP_DIR=<backup-root>/<backup-id>
 
 # 1. Nur prüfen (rein lesend, keine destruktive Mutation):
 "$RELEASE_DIR/ops/deploy/upgrade-site-dc.sh" preflight
@@ -175,6 +194,89 @@ Container im selben Projekt/Volume; der `db`-Container wird **nie** neu erstellt
 - **Echter `POST /movements`** (durch die App) liefert 201 und erzeugt **atomar**
   genau ein Movement **und** ein passendes Outbox-Event mit gleicher `event_id`.
 
+## Resume — read-only Nachverifikation und State-Abschluss
+
+Der `resume`-Pfad schließt ein Upgrade ab, das die Migration bereits erfolgreich
+durchlaufen hat und in Phase `runtime-up` oder `verified` steht — ohne die
+Migration, einen Schreibtest oder einen Container-Neustart zu wiederholen. Er
+existiert für genau den Fall, dass die Laufzeit **technisch korrekt** ist, der
+**formale State** aber noch nicht auf `complete` steht (historisch: der
+ursprüngliche `verify` schlug nur im Verification-Harness fehl, weil das `NEWID`
+fehlte — behoben in PR #7; der read-only Resume kam mit PR #8).
+
+**Unterstützter Ausgangszustand:** Phase `runtime-up` oder `verified`.
+
+**`STATE_FILE`-Override beim Resume über ein neueres Release.** Der Resume wird aus
+dem neueren, freigegebenen Release ausgeführt (`RELEASE_DIR`/`EXPECTED_COMMIT`
+zeigen auf den neuen Merge-Commit), aber `STATE_FILE` zeigt weiterhin auf die
+State-Datei des **ursprünglichen Rollouts**:
+
+```bash
+# Allgemeines Beispiel — nicht erneut auszuführen, wenn der State bereits "complete" ist:
+RELEASE_DIR=<release-root>/<approved-release> \
+EXPECTED_COMMIT=<NEW> \
+STATE_FILE=<state-root>/.hol-upgrade-<rollout-id>.state \
+PROJECT=hol-site-dc \
+"<release-root>/<approved-release>/ops/deploy/upgrade-site-dc.sh" resume
+```
+
+**Warum die ursprüngliche State-Datei die Source of Truth bleibt:** Der State
+beschreibt den Fortschritt *dieses einen* Upgrades der laufenden Installation, nicht
+des Release-Artefakts. Ein neues Release ändert den Code, nicht den erreichten
+Migrationsfortschritt. Eine zweite, release-eigene State-Datei würde den Zustand
+spalten; deshalb wird per Override konsequent auf die Datei des ursprünglichen
+Rollouts (`.hol-upgrade-<OLD>.state`) verwiesen.
+
+**Was `resume` tut (alles read-only bis auf die State-Writes):**
+
+- erwirbt denselben exklusiven `flock` wie `rollout` (kein paralleler Lauf);
+- prüft per `docker compose exec` in die **laufenden** Container, ohne sie zu ändern;
+- führt die DB-Prüfungen in `READ ONLY`-Transaktionen aus (Migrationen 0001–0003,
+  DB-/Objekt-/Sequenz-Owner, Rollenattribute, Outbox-Backfill 1:1);
+- prüft `EVENTS_ENABLED=false` sowie `/healthz` und `/readyz` per `GET`;
+- prüft das **bestehende** `VERIFY-1` und sein bestehendes Outbox-Event — **ohne**
+  neuen `POST` (im Gegensatz zum normalen `verify`, der einen echten Schreibtest
+  fährt);
+- bestätigt die Least-Privilege-Rechte von `inventory_app`;
+- setzt nach erfolgreicher Gesamtprüfung den State **atomar** zuerst auf `verified`,
+  danach auf `complete`.
+
+**Atomarer State-Write und Lock.** Der State wird über eine Tempdatei + `rename`
+atomar getauscht; es bleibt keine `.hol-state.*`-Tempdatei zurück. Nach dem Lauf
+existiert `.hol-upgrade.lock` als **leere** Lock-Datei, die kein Prozess mehr hält.
+
+**Verhalten bei Resume-Fehlern.** Bei Exit-Code ≠ 0: **kein** zweiter Versuch und
+**keine** manuelle State-Korrektur. Stattdessen den aktuellen State und die
+Beobachtungen read-only erfassen und stoppen. Der Resume nimmt **keine**
+automatische Reparatur und **keinen** Container-Eingriff vor.
+
+```bash
+# Aktuelle Phase read-only anzeigen:
+RELEASE_DIR=<release-root>/<approved-release> \
+STATE_FILE=<state-root>/.hol-upgrade-<rollout-id>.state \
+"<release-root>/<approved-release>/ops/deploy/upgrade-site-dc.sh" state
+```
+
+### Tatsächlich ausgeführter Resume (Betriebsnachweis — nicht erneut ausführen)
+
+> **Historisch ausgeführt am 20.06.2026 während der kontrollierten
+> Gate-A-Verifikation, Exit-Code `0`.**
+> Der State steht bereits auf `complete`; dieser Lauf ist **nicht** zu wiederholen.
+
+- Release `73e2ef9` (`EXPECTED_COMMIT=73e2ef96635ae9332a4dc43bdea61bffa0dc0a48`),
+  `STATE_FILE=<state-root>/.hol-upgrade-<rollout-id>.state`, `PROJECT=hol-site-dc`.
+- Read-only nachgewiesen: Migrationen `0001`/`0002`/`0003`, korrekte Owner/Rollen
+  (kein Superuser/Replikation), `stock_movements=2`, `event_outbox=2` (alle
+  `pending`), genau ein `VERIFY-1` + ein passendes Outbox-Event, `EVENTS_ENABLED=false`,
+  `/healthz=200`, `/readyz=200`, Least-Privilege bestanden.
+- State-Übergang `runtime-up → verified → complete`; atomar geschrieben, keine
+  Tempdatei verblieben; leere Lock-Datei zurück, kein Halter.
+- Kein POST, keine Migration, keine DB-Mutation, kein Build, kein neuer Container,
+  kein Start/Stop/Restart/Recreate; Container-ID/Image-ID/`StartedAt`/`RestartCount`,
+  Volume `hol-site-dc_pgdata` und Release-`.env` unverändert.
+
+Details: [Handoff Phase 2B / Gate A](handoff-phase-2b-gate-a.md).
+
 ## Rollback — phasenabhängig
 
 > **Wichtig:** Nach Migration `0003` existiert der FK
@@ -231,7 +333,7 @@ Fehler-Handler (`die`) als auch vom manuellen `--restart-old`-Pfad genutzt. Er:
   5. **Owner & Rollen des Alt-Zustands prüfen:** `db` starten (`… start db`), dann
      `pg_get_userbyid(datdba)` für `inventory` und Owner von `stock_movements`
      kontrollieren (Alt-Rolle `inventory`), `schema_migrations` ist wieder abwesend.
-  6. **Alte Runtime starten:** `cd /home/ops/hybrid-ops-lab/sites/dc && docker compose up -d inventory`
+  6. **Alte Runtime starten:** `cd <legacy-working-copy>/sites/dc && docker compose up -d inventory`
   7. **Health + echter Schreib-/Lesevorgang prüfen:** `/readyz` == 200, ein
      `POST /movements` (201) und ein `GET /movements` gegen die alte App.
 
