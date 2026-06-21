@@ -110,17 +110,21 @@ Wiederholung in genau einem Effekt. So bleibt das System trotz mehrfacher Zustel
 ## Poison Messages / Deployment-Reife
 
 Validierungsfehler und Konflikte werden **fail closed** behandelt: nie automatisch
-bestätigt, **keine** Nachricht geht verloren. Ohne **DLQ/Redrive** kann eine solche
-„poison" Nachricht jedoch nach jedem Visibility-Timeout **endlos** erneut zugestellt
-werden. Für jeden dieser Fälle existieren niedrig-kardinale Metriken
-(`consumer_validation_failures_total{reason}`, `consumer_integrity_conflicts_total{kind}`),
-sodass Dauer-Redeliveries sichtbar werden.
+bestätigt, **keine** Nachricht geht verloren. Für jeden dieser Fälle existieren
+niedrig-kardinale Metriken (`consumer_validation_failures_total{reason}`,
+`consumer_integrity_conflicts_total{kind}`), sodass Dauer-Redeliveries sichtbar werden.
 
-Daraus folgt die Reifegrenze: Die Consumer-Idempotenz ist **lokal** vollständig und
-korrekt, aber ein **Live-Deployment ist erst nach** einer expliziten
-Poison-Message-Policy (DLQ/Redrive bzw. definierter Maximalzustellung) **freigegeben**.
-DLQ/Redrive und Publisher gehören in spätere Phase-3-Schritte und sind hier
-**nicht** enthalten.
+**DLQ/Redrive ist im Repository umgesetzt (Gate D2).** Die Main-Queue besitzt eine
+**native Redrive-Policy** mit `maxReceiveCount = 5`: eine dauerhaft nicht
+verarbeitbare „poison" Nachricht wird nach **fünf** Zustellungen automatisch von
+SQS/ElasticMQ in die DLQ (`inventory-movements-dlq`) verschoben — die Anwendung
+verschiebt nichts manuell. Damit endet die zuvor mögliche Endlos-Redelivery.
+Details: [ADR-007](decisions/007-dlq-and-redrive.md).
+
+**Reifegrenze:** Diese Schutzmechanismen sind **im Repository vorhanden**, aber
+**noch nicht live deployed/auf der VM verifiziert**. Der **Outbox-Publisher ist
+weiterhin nicht implementiert**, **Phase 3 ist nicht aktiviert** (`EVENTS_ENABLED=false`),
+und es gibt weiterhin **keine Exactly-once-Garantie**.
 
 ## Deployment-Voraussetzung (nicht stillschweigend)
 
