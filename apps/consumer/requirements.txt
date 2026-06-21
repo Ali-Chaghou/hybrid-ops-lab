@@ -2,5 +2,6 @@ fastapi==0.136.3
 uvicorn[standard]==0.49.0
 prometheus-client==0.25.0
 boto3==1.43.29
-# Idempotency-Store nutzt psycopg (einzelne Verbindungen, kein Pool).
-psycopg[binary]~=3.2
+# Idempotency-Store nutzt psycopg mit Connection-Pool (psycopg_pool), wie die
+# inventory-App: am Prozessstart geoeffnet, am Shutdown geschlossen.
+psycopg[binary,pool]~=3.2
