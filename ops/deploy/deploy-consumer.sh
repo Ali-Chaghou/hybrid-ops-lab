@@ -21,6 +21,11 @@ IMAGE="${IMAGE:-inventory-consumer:dev}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MANIFEST="${REPO_ROOT}/sites/cloud/k8s/consumer.yaml"
 ENV_FILE="${ENV_FILE:-${REPO_ROOT}/sites/cloud/.env}"
+METRICS_NODEPORT="${METRICS_NODEPORT:-30090}"
+SERVER_NODE="k3d-${CLUSTER}-server-0"
+# Verzeichnis der Prometheus-file-sd-Targets (im monitoring-Compose read-only nach
+# /etc/prometheus/targets gemountet). Ueberschreibbar fuer Tests.
+TARGET_DIR="${TARGET_DIR:-${REPO_ROOT}/monitoring/prometheus/targets}"
 
 echo "[deploy-consumer] Voraussetzung: Consumer-DB, Rollen und Migration sind vorbereitet"
 echo "[deploy-consumer]   (sites/cloud: docker compose up -d consumer-db consumer-db-bootstrap consumer-db-prepare consumer-migrate)."
@@ -38,6 +43,17 @@ if [ -z "${GATEWAY}" ]; then
   exit 1
 fi
 echo "[deploy-consumer] k3d-Gateway: ${GATEWAY}"
+
+# Fail closed: der Consumer-/metrics-NodePort MUSS vom k3d-Server-Node auf den Host
+# veroeffentlicht sein, sonst kann Prometheus host.docker.internal:${METRICS_NODEPORT}
+# nicht scrapen und es entstuende keine up{job="consumer"}-Serie. Ohne gueltigen
+# Scrape-Pfad wird NICHT weiter deployt.
+if ! docker port "${SERVER_NODE}" "${METRICS_NODEPORT}/tcp" >/dev/null 2>&1; then
+  echo "[deploy-consumer] FEHLER: NodePort ${METRICS_NODEPORT} ist nicht auf den Host veroeffentlicht." >&2
+  echo "[deploy-consumer] Cluster mit Portabbildung erstellen: ops/bootstrap/create-site-cloud-cluster.sh" >&2
+  exit 1
+fi
+echo "[deploy-consumer] NodePort ${METRICS_NODEPORT} auf Host veroeffentlicht — ok."
 
 # Image bauen + importieren — BEVOR irgendwelche Secrets geladen werden, damit waehrend
 # des Builds nichts Geheimes in der Umgebung steht. Kontext = Repo-Root (ops/ + Migrationen).
@@ -83,4 +99,18 @@ kubectl apply -f <(sed "s|__K3D_GATEWAY__|${GATEWAY}|g" "${MANIFEST}")
 # (envFrom-Secret-Aenderungen starten Pods nicht automatisch neu).
 kubectl -n inventory rollout restart deployment/inventory-consumer
 kubectl -n inventory rollout status deployment/inventory-consumer --timeout=90s
-echo "[deploy-consumer] Consumer deployed (host.k3d.internal -> ${GATEWAY})."
+
+# Prometheus-file-sd-Target reproduzierbar + ATOMAR erzeugen (temp + mv). Adresse =
+# host.docker.internal:${METRICS_NODEPORT} (stabil, unabhaengig von Cluster-Neuaufbau,
+# keine echte IP, kein Secret). Damit existiert die up{job="consumer"}-Serie auch dann,
+# wenn der Consumer-Endpunkt down ist (-> ConsumerDown-Alert auswertbar).
+if [ ! -d "${TARGET_DIR}" ]; then
+  echo "[deploy-consumer] FEHLER: Target-Verzeichnis ${TARGET_DIR} fehlt." >&2
+  exit 1
+fi
+TMP_TARGET="$(mktemp "${TARGET_DIR}/.consumer.json.XXXXXX")"
+printf '[\n  { "targets": ["host.docker.internal:%s"], "labels": { "site": "cloud", "app": "inventory-consumer" } }\n]\n' \
+  "${METRICS_NODEPORT}" > "${TMP_TARGET}"
+mv -f "${TMP_TARGET}" "${TARGET_DIR}/consumer.json"
+echo "[deploy-consumer] Prometheus-Target geschrieben: ${TARGET_DIR}/consumer.json"
+echo "[deploy-consumer] Consumer deployed (host.k3d.internal -> ${GATEWAY}; /metrics -> host.docker.internal:${METRICS_NODEPORT})."

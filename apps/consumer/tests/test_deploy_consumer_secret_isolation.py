@@ -8,6 +8,7 @@ Capture-Dateien; der Test prueft, dass keine Sentinel-Passwoerter darin auftauch
 from __future__ import annotations
 
 import os
+import json
 import pathlib
 import shutil
 import subprocess
@@ -24,7 +25,10 @@ _SENTINELS = (_PG, _ADMIN, _APP)
 
 _FAKE_DOCKER = """#!/usr/bin/env bash
 env > "${CAPTURE_DIR}/docker.$$"
-if [ "$1" = "network" ]; then echo "172.30.0.1"; fi
+case "$1" in
+  network) echo "172.30.0.1" ;;
+  port) echo "0.0.0.0:30090" ;;
+esac
 exit 0
 """
 
@@ -73,12 +77,16 @@ def test_passwords_not_inherited_by_child_processes(tmp_path):
         encoding="utf-8",
     )
 
+    target_dir = tmp_path / "targets"
+    target_dir.mkdir()
+
     env = dict(os.environ)
     env["PATH"] = f"{fakedir}:{env['PATH']}"
     env["CAPTURE_DIR"] = str(capture)
     env["ENV_FILE"] = str(env_file)
     env["CLUSTER"] = "site-cloud"
     env["NETWORK"] = "k3d-site-cloud"
+    env["TARGET_DIR"] = str(target_dir)  # nicht ins echte Repo schreiben
 
     result = subprocess.run(
         ["bash", str(DEPLOY)],
@@ -99,3 +107,68 @@ def test_passwords_not_inherited_by_child_processes(tmp_path):
         text = cap.read_text(encoding="utf-8", errors="replace")
         for secret in _SENTINELS:
             assert secret not in text, f"Secret an Kindprozess {cap.name} vererbt!"
+
+
+_FAKE_DOCKER_NO_PORT = """#!/usr/bin/env bash
+case "$1" in
+  network) echo "172.30.0.1" ;;
+  port) exit 1 ;;   # NodePort NICHT veroeffentlicht
+esac
+exit 0
+"""
+
+
+def _base_env(tmp_path, fakedir):
+    env_file = tmp_path / "site-cloud.env"
+    env_file.write_text(
+        "POSTGRES_PASSWORD=x\nCONSUMER_DB=consumer\nCONSUMER_DB_HOST_PORT=5433\n"
+        "CONSUMER_ADMIN_PASSWORD=a\nCONSUMER_APP_PASSWORD=b\n",
+        encoding="utf-8",
+    )
+    env = dict(os.environ)
+    env["PATH"] = f"{fakedir}:{env['PATH']}"
+    env["ENV_FILE"] = str(env_file)
+    env["CLUSTER"] = "site-cloud"
+    env["NETWORK"] = "k3d-site-cloud"
+    env["CAPTURE_DIR"] = str(tmp_path)
+    return env
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash benoetigt")
+def test_target_generated_atomically_and_valid(tmp_path):
+    fakedir = tmp_path / "fakebin"
+    fakedir.mkdir()
+    _write_exec(fakedir / "docker", _FAKE_DOCKER)
+    _write_exec(fakedir / "k3d", _FAKE_K3D)
+    _write_exec(fakedir / "kubectl", _FAKE_KUBECTL)
+    target_dir = tmp_path / "targets"
+    target_dir.mkdir()
+    env = _base_env(tmp_path, fakedir)
+    env["TARGET_DIR"] = str(target_dir)
+
+    result = subprocess.run(["bash", str(DEPLOY)], env=env, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    target = target_dir / "consumer.json"
+    assert target.exists()
+    data = json.loads(target.read_text(encoding="utf-8"))  # valides JSON
+    assert data[0]["targets"] == ["host.docker.internal:30090"]
+    # keine zurueckgebliebene Tempdatei (atomarer mv)
+    assert not list(target_dir.glob(".consumer.json.*"))
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash benoetigt")
+def test_deploy_fails_closed_when_nodeport_not_published(tmp_path):
+    fakedir = tmp_path / "fakebin"
+    fakedir.mkdir()
+    _write_exec(fakedir / "docker", _FAKE_DOCKER_NO_PORT)
+    _write_exec(fakedir / "k3d", _FAKE_K3D)
+    _write_exec(fakedir / "kubectl", _FAKE_KUBECTL)
+    target_dir = tmp_path / "targets"
+    target_dir.mkdir()
+    env = _base_env(tmp_path, fakedir)
+    env["TARGET_DIR"] = str(target_dir)
+
+    result = subprocess.run(["bash", str(DEPLOY)], env=env, capture_output=True, text=True, timeout=60)
+    assert result.returncode != 0  # fail closed
+    assert not (target_dir / "consumer.json").exists()  # kein Target ohne Erreichbarkeit
+    assert "NodePort" in result.stderr

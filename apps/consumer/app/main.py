@@ -13,6 +13,7 @@ from fastapi import FastAPI, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from app.consumer import consumer
+from app.metrics import CONSUMER_LIVE, CONSUMER_READY
 
 logging.basicConfig(level=logging.INFO)
 
@@ -47,4 +48,8 @@ def readyz() -> Response:
 
 @app.get("/metrics")
 def metrics() -> Response:
+    # Liveness/Readiness als Gauges zur Scrape-Zeit aktualisieren (1/0), damit
+    # consumer_live/consumer_ready den aktuellen Zustand widerspiegeln.
+    CONSUMER_LIVE.set(1 if consumer.healthy else 0)
+    CONSUMER_READY.set(1 if consumer.ready else 0)
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
