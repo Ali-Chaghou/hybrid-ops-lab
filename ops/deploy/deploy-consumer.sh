@@ -4,6 +4,14 @@
 # und deployt das Manifest. Die k3d-Netz-Gateway-IP (= VM-Host aus Pod-Sicht) wird
 # zur Deploy-Zeit ermittelt und in das hostAliases-Feld eingesetzt, statt sie fest
 # im YAML zu pinnen.
+#
+# VORAUSSETZUNG (wird NICHT von diesem Skript erledigt): Consumer-DB, Rollen
+# (consumer_admin/consumer_app) und die Migration 0001_init muessen bereits
+# vorbereitet sein — ueber den site-cloud-Compose-Stack:
+#   cd sites/cloud && docker compose up -d consumer-db \
+#       consumer-db-bootstrap consumer-db-prepare consumer-migrate
+# Erst danach kann der k3d-Consumer als consumer_app gegen die DB starten.
+#
 # Auszufuehren auf der VM site-cloud (docker, k3d, kubectl vorhanden).
 set -euo pipefail
 
@@ -12,6 +20,16 @@ NETWORK="${NETWORK:-k3d-${CLUSTER}}"
 IMAGE="${IMAGE:-inventory-consumer:dev}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MANIFEST="${REPO_ROOT}/sites/cloud/k8s/consumer.yaml"
+ENV_FILE="${ENV_FILE:-${REPO_ROOT}/sites/cloud/.env}"
+
+echo "[deploy-consumer] Voraussetzung: Consumer-DB, Rollen und Migration sind vorbereitet"
+echo "[deploy-consumer]   (sites/cloud: docker compose up -d consumer-db consumer-db-bootstrap consumer-db-prepare consumer-migrate)."
+echo "[deploy-consumer] Dieses Skript richtet KEINE Datenbank ein."
+
+if [ ! -f "${ENV_FILE}" ]; then
+  echo "[deploy-consumer] ${ENV_FILE} fehlt (aus .env.example anlegen, starke Werte setzen)." >&2
+  exit 1
+fi
 
 # Gateway des k3d-Docker-Netzes = VM-Host, wie ihn die Pods erreichen.
 GATEWAY="$(docker network inspect "${NETWORK}" -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}')"
@@ -21,12 +39,48 @@ if [ -z "${GATEWAY}" ]; then
 fi
 echo "[deploy-consumer] k3d-Gateway: ${GATEWAY}"
 
-# Image bauen und in den Cluster importieren (kein Registry-Push noetig).
-docker build -t "${IMAGE}" "${REPO_ROOT}/apps/consumer"
+# Image bauen + importieren — BEVOR irgendwelche Secrets geladen werden, damit waehrend
+# des Builds nichts Geheimes in der Umgebung steht. Kontext = Repo-Root (ops/ + Migrationen).
+docker build -t "${IMAGE}" -f "${REPO_ROOT}/apps/consumer/Dockerfile" "${REPO_ROOT}"
 k3d image import "${IMAGE}" -c "${CLUSTER}"
 
-# Platzhalter durch die ermittelte Gateway-IP ersetzen und anwenden.
-sed "s|__K3D_GATEWAY__|${GATEWAY}|g" "${MANIFEST}" | kubectl apply -f -
+# Namespace sicherstellen (idempotent) — muss vor dem Secret existieren.
+kubectl create namespace inventory --dry-run=client -o yaml | kubectl apply -f -
 
+# --- Enger, kontrollierter Secret-Block --------------------------------------
+# Die .env wird NICHT global exportiert (kein `set -a`), damit POSTGRES_PASSWORD,
+# CONSUMER_*_PASSWORD und die DATABASE_URL nicht in den Environments von docker/
+# k3d/kubectl-Kindprozessen landen. Der DSN geht ausschliesslich ueber eine
+# 0600-Tempdatei an `kubectl --from-file` (Dateiinhalt = Wert, kein KEY=VALUE-Parsing,
+# nichts in der Prozessargumentliste). trap loescht die Tempdatei bei Erfolg UND Fehler.
+SECRET_FILE=""
+cleanup_secret() { [ -n "${SECRET_FILE}" ] && rm -f "${SECRET_FILE}"; return 0; }
+trap cleanup_secret EXIT
+
+create_db_secret() {
+  # shellcheck source=/dev/null
+  . "${ENV_FILE}"
+  : "${CONSUMER_DB:?CONSUMER_DB nicht in .env gesetzt}"
+  : "${CONSUMER_APP_PASSWORD:?CONSUMER_APP_PASSWORD nicht in .env gesetzt (leer = Fail closed)}"
+  local port="${CONSUMER_DB_HOST_PORT:-5433}"
+  SECRET_FILE="$(mktemp)"
+  chmod 600 "${SECRET_FILE}"
+  printf '%s' "host=host.k3d.internal port=${port} user=consumer_app password=${CONSUMER_APP_PASSWORD} dbname=${CONSUMER_DB}" > "${SECRET_FILE}"
+  kubectl create secret generic consumer-db-creds \
+    --namespace inventory \
+    --from-file=DATABASE_URL="${SECRET_FILE}" \
+    --dry-run=client -o yaml | kubectl apply -f -
+  rm -f "${SECRET_FILE}"
+  SECRET_FILE=""
+}
+create_db_secret
+trap - EXIT
+
+# Manifest anwenden (nur die NICHT-geheime Gateway-IP wird per sed gesetzt).
+kubectl apply -f <(sed "s|__K3D_GATEWAY__|${GATEWAY}|g" "${MANIFEST}")
+
+# Rollout neu anstossen, damit der Pod eine ggf. rotierte DATABASE_URL uebernimmt
+# (envFrom-Secret-Aenderungen starten Pods nicht automatisch neu).
+kubectl -n inventory rollout restart deployment/inventory-consumer
 kubectl -n inventory rollout status deployment/inventory-consumer --timeout=90s
 echo "[deploy-consumer] Consumer deployed (host.k3d.internal -> ${GATEWAY})."

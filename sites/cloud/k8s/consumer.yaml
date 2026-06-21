@@ -27,6 +27,11 @@ stringData:
   # wuerde man IRSA / External Secrets nutzen, nicht committete Werte.
   AWS_ACCESS_KEY_ID: "test"
   AWS_SECRET_ACCESS_KEY: "test"
+# Hinweis: Das Secret `consumer-db-creds` (DATABASE_URL fuer consumer_app) wird
+# NICHT hier gepflegt. Es wird zur Deploy-Zeit aus der gitignorten sites/cloud/.env
+# erzeugt (ops/deploy/deploy-consumer.sh, kubectl create secret --from-file ueber eine
+# 0600-Tempdatei, Dateiinhalt = Wert), damit das Passwort weder im Repo noch in
+# Prozessargumenten erscheint. Das Deployment referenziert es per secretRef.
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -64,6 +69,8 @@ spec:
                 name: consumer-config
             - secretRef:
                 name: consumer-aws-creds
+            - secretRef:
+                name: consumer-db-creds
           readinessProbe:
             httpGet:
               path: /readyz

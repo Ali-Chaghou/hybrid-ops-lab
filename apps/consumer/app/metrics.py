@@ -3,15 +3,9 @@ from __future__ import annotations
 
 from prometheus_client import Counter, Gauge, Histogram
 
-MESSAGES_CONSUMED = Counter(
-    "consumer_messages_consumed_total",
-    "Verarbeitete Nachrichten aus der Queue.",
-    ["result"],  # success | error
-)
-
 MESSAGE_PROCESSING_DURATION = Histogram(
     "consumer_message_processing_duration_seconds",
-    "Dauer der Verarbeitung einer einzelnen Nachricht.",
+    "Dauer der Verarbeitung einer einzelnen Nachricht (Validierung + DB-Transaktion + Delete).",
 )
 
 RECEIVE_ERRORS = Counter(
@@ -22,6 +16,20 @@ RECEIVE_ERRORS = Counter(
 QUEUE_DEPTH = Gauge(
     "consumer_queue_depth_approximate",
     "Ungefaehre Anzahl sichtbarer Nachrichten in der Queue.",
+)
+
+# Zeitpunkt der letzten erfolgreich abgeschlossenen Verarbeitung (applied ODER
+# idempotent erkanntes Duplikat) — fuer eine "Consumer macht Fortschritt"-Sicht.
+LAST_SUCCESS_TIMESTAMP = Gauge(
+    "consumer_last_success_timestamp_seconds",
+    "Unix-Zeit der letzten erfolgreich abgeschlossenen (loeschbaren) Verarbeitung.",
+)
+
+# Zeitpunkt des letzten erfolgreichen Long-Polls (auch wenn er leer war) — Basis
+# fuer Poll-Freshness/Readiness und zum Erkennen haengender Receive-Aufrufe.
+LAST_POLL_TIMESTAMP = Gauge(
+    "consumer_last_poll_timestamp_seconds",
+    "Unix-Zeit des letzten erfolgreichen Receive-Aufrufs (leerer Poll zaehlt).",
 )
 
 # --- Idempotenz-Consumer (Phase 1): eindeutige, niedrig-kardinale Metriken -----
