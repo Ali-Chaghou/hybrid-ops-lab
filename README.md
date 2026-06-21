@@ -28,10 +28,16 @@ und `hol-site-cloud` (4 vCPU / 8 GB). cloud-init setzt statische IP, den Benutze
 reproduzierbar und versioniert, nicht handgeklickt.
 
 **Wiederverwendbares Queue-Modul — `infra/modules/event-queue/`.** Kapselt eine
-`aws_sqs_queue` mit Visibility-Timeout und Retention als Variablen, gepinnt auf
-`hashicorp/aws ~> 6.0`. Das Environment `infra/environments/cloud/` ruft das Modul
-auf und richtet den AWS-Provider auf den lokalen ElasticMQ-Endpoint
-(Dummy-Credentials + `skip_*`-Flags, damit kein echtes AWS angesprochen wird).
+**Standard-SQS-Queue** (kein FIFO, at-least-once — **keine** Exactly-once-Behauptung)
+mit Visibility-Timeout und Retention als Variablen, gepinnt auf
+`hashicorp/aws ~> 6.0`. Das Modul erzeugt zusätzlich eine **Dead-Letter-Queue** und
+setzt eine **native Redrive-Policy** (`maxReceiveCount = 5`): dauerhaft nicht
+verarbeitbare Nachrichten verschiebt SQS/ElasticMQ selbst in die DLQ — die Anwendung
+verschiebt nichts manuell. Hintergrund:
+[ADR-007](docs/decisions/007-dlq-and-redrive.md). Das Environment
+`infra/environments/cloud/` ruft das Modul auf und richtet den AWS-Provider auf den
+lokalen ElasticMQ-Endpoint (Dummy-Credentials + `skip_*`-Flags, damit kein echtes
+AWS angesprochen wird).
 
 **Bewusste Trennung statt Workaround.** Gegen den Emulator wird *kein* `tofu apply`
 gefahren: Der AWS-Provider liest nach dem Anlegen `GetQueueAttributes` zurück und
@@ -82,6 +88,17 @@ Der Alertmanager nutzt im Lab einen Null-Receiver (kein echter Versand, keine
 Secrets im Repo); eine zweite Regel `StreckeDown` (`probe_success == 0`) deckt den
 Totalausfall ab.
 
+**Consumer- und Queue-/DLQ-Monitoring (Gate D2, im Repository).** Der Consumer
+exponiert niedrig-kardinale Metriken für Liveness und Readiness, Receive-/DB-/
+Delete-Fehler, Redeliveries (`ApproximateReceiveCount > 1`), Poison-/Conflict-Signale
+(Validierungsfehler, Integritätskonflikte) sowie Main-Queue- und DLQ-Tiefe.
+Dazu gehören Alert-Regeln (`ConsumerDown`, `ConsumerNotReady`, `MainQueueBacklog`,
+`DLQNotEmpty` u. a.) mit großzügigen `for`-Dauern. **Wichtig:** Die Queue-/DLQ-Tiefe
+wird vom Consumer abgefragt — fällt der Consumer aus, fehlen diese Werte, und
+`ConsumerDown` ist dann das primäre Signal. Es gibt **keine** unabhängige
+Queue-Überwachung. Scrape-Pfad und Prometheus-Target werden reproduzierbar
+vorbereitet; eine **Live-Verifikation auf der VM steht noch aus**.
+
 ## Status
 
 Alle nachfolgend aufgeführten Basisphasen 1–7 wurden umgesetzt und in der
@@ -114,12 +131,46 @@ Installation lief kontrolliert und idempotent über
 | **Gate A** (technisch und formal) | ✅ abgeschlossen |
 | Events (`EVENTS_ENABLED`) | ⏸️ deaktiviert (`false`) |
 | Outbox-Einträge | `pending` (kein Publish im HTTP-Request-Pfad) |
-| Publisher / Phase 3 (Outbox → Queue) | ⬜ noch nicht begonnen |
+| Event-Flow (Phase 3) | siehe Abschnitt unten (Gate D1/D2 im Repo, nicht live) |
 
 Der bewiesene Live-Zustand, die erhaltene Fehlerhistorie und der ausgeführte
 Resume-Betriebsnachweis stehen im
 [Handoff Phase 2B / Gate A](docs/handoff-phase-2b-gate-a.md); der Resume-Pfad selbst
 im [Runbook](docs/runbook-phase-2b-upgrade-site-dc.md#resume--read-only-nachverifikation-und-state-abschluss).
+
+### Phase 3 — Event-Flow (Consumer-Idempotenz, DLQ, Monitoring)
+
+Phase 3 baut den Weg `event_outbox → separater Publisher → Queue → Consumer` auf.
+Der **Publisher ist noch nicht implementiert**; `EVENTS_ENABLED=false` und Phase 3
+ist **nicht aktiviert**. Wichtige Unterscheidung: **im Repository implementiert &
+gemerged** ist nicht dasselbe wie **live deployed/auf der VM verifiziert**. Gate D1
+und D2 sind im Repository umgesetzt, aber **noch nicht live deployed/verifiziert**.
+
+| Gate | Inhalt | Stand |
+|---|---|---|
+| Gate A / Phase 2B | Transactional Outbox, kontrollierter site-dc-Upgrade | ✅ abgeschlossen & verifiziert |
+| Gate D1 | idempotente Consumer-Runtime (Inbox/Projection verdrahtet, Commit vor Queue-Delete, Transport-/Business-Duplikate erkannt, Konflikte/Fehler fail closed) | 🔧 im Repo gemerged · ⛔ nicht live deployed |
+| Gate D2 | Main Queue + DLQ, native Redrive-Policy (`maxReceiveCount = 5`), Poison-Message-Policy, Consumer-/Queue-/DLQ-Metriken & Alerts, reproduzierbarer Scrape-Pfad | 🔧 im Repo gemerged · ⛔ nicht live deployed |
+| Gate D3 / Outbox-Publisher | separater Publisher (Outbox → Queue) | ⬜ nächster Schritt, nicht implementiert |
+| Phase 3 gesamt | Event-Versand aktiviert | ⛔ nicht aktiviert (`EVENTS_ENABLED=false`) |
+
+Details: [Idempotenz](docs/idempotency.md) (Gate D1) und
+[ADR-007](docs/decisions/007-dlq-and-redrive.md) (Gate D2). Gate D1/D2 sind
+**nicht** produktiv, live oder vollständig ausgerollt.
+
+### Nächster Schritt — Gate D3 (Outbox-Publisher)
+
+Konzeptioneller Umfang (noch **nicht** implementiert; hier keine Implementierung als
+vorhanden dargestellt):
+
+- separater Outbox-Publisher **außerhalb** des HTTP-Request-Pfads;
+- eigene Least-Privilege-Datenbankrolle;
+- kontrolliertes Claiming aus `event_outbox`;
+- Publish an SQS/ElasticMQ;
+- Statuswechsel der Outbox-Zeile **erst nach bestätigtem Publish**;
+- Retry/Backoff und Metriken;
+- standardmäßig deaktiviert;
+- Tests und Review **vor** einem kontrollierten Deployment.
 
 ## Schnellstart
 
@@ -148,8 +199,8 @@ make down            # Compose-Stacks stoppen (k3d-Cluster bleibt)
 ```
 hybrid-ops-lab/
 ├── apps/
-│   ├── inventory/        # FastAPI + Postgres, publiziert Events nach SQS
-│   └── consumer/         # FastAPI-Consumer (at-least-once), laeuft auf k3d
+│   ├── inventory/        # FastAPI + Postgres: schreibt Movement + Outbox-Event atomar
+│   └── consumer/         # FastAPI-Consumer (at-least-once, idempotent), laeuft auf k3d
 ├── sites/
 │   ├── dc/               # Docker-Compose: inventory, Postgres, node_exporter
 │   └── cloud/            # Docker-Compose: ElasticMQ (SQS), Toxiproxy, node_exporter
@@ -170,6 +221,14 @@ hybrid-ops-lab/
 └── Makefile              # Desktop-Orchestrierung (make up/check/demo-*/down)
 ```
 
+**Event-Flow (Soll):** `inventory` schreibt Movement und Outbox-Event **atomar** in
+einer Transaktion (kein direkter Publish im HTTP-Request-Pfad); ein **künftiger,
+separater Publisher** (Gate D3, noch nicht implementiert) übernimmt
+`event_outbox → Queue`; der `consumer` verarbeitet Queue-Events **idempotent** über
+die `event_id` (Inbox/Projection). Siehe [Idempotenz](docs/idempotency.md),
+[ADR-006](docs/decisions/006-transactional-outbox.md) und
+[ADR-007](docs/decisions/007-dlq-and-redrive.md).
+
 ## Sicherheit
 
 Keine produktiven Secrets im Repository. Siehe [SECURITY.md](SECURITY.md).
@@ -181,3 +240,6 @@ Keine produktiven Secrets im Repository. Siehe [SECURITY.md](SECURITY.md).
 - [ADR-003](docs/decisions/003-toxiproxy-als-strecke.md) – Toxiproxy als Standortverbindung
 - [ADR-004](docs/decisions/004-proxmox-provisionierung.md) – Proxmox-Provisionierung via OpenTofu
 - [ADR-005](docs/decisions/005-elasticmq-statt-localstack.md) – ElasticMQ statt LocalStack als SQS-Endpoint
+- [ADR-006](docs/decisions/006-transactional-outbox.md) – Transactional Outbox statt Publish im Request-Pfad
+- [ADR-007](docs/decisions/007-dlq-and-redrive.md) – DLQ, native Redrive-Policy und Poison-Message-Behandlung
+- [Idempotenz](docs/idempotency.md) – Consumer-Idempotenz (Inbox/Projection, Duplikat-/Konfliktbehandlung)
