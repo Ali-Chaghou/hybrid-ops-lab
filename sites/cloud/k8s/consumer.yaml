@@ -13,6 +13,9 @@ data:
   # In Phase 5 zeigt SQS_ENDPOINT_URL stattdessen auf die Toxiproxy-Adresse.
   SQS_ENDPOINT_URL: "http://host.k3d.internal:9326"
   SQS_QUEUE_URL: "http://host.k3d.internal:9324/000000000000/inventory-movements"
+  # Nur fuer die DLQ-Tiefen-Metrik (GetQueueAttributes). Der Consumer liest/loescht
+  # NICHT aus der DLQ; das Dead-Lettering macht die native Redrive-Policy.
+  SQS_DLQ_QUEUE_URL: "http://host.k3d.internal:9324/000000000000/inventory-movements-dlq"
   AWS_REGION: "eu-central-1"
 ---
 apiVersion: v1
@@ -99,9 +102,17 @@ metadata:
   labels:
     app: inventory-consumer
 spec:
+  # NodePort, damit Prometheus (im monitoring-Compose auf dem VM-Host) /metrics ueber
+  # host.docker.internal:<nodePort> scrapen kann. VORAUSSETZUNG: der k3d-Cluster muss
+  # 30090 auf den Host veroeffentlichen — das passiert NUR beim Clusteraufbau via
+  # ops/bootstrap/create-site-cloud-cluster.sh (k3d cluster create ... --port
+  # '30090:30090@server:0'). Ein type:NodePort allein ist NICHT host-erreichbar.
+  # ops/deploy/deploy-consumer.sh prueft das fail closed und erzeugt das Scrape-Target.
+  type: NodePort
   selector:
     app: inventory-consumer
   ports:
     - name: http
       port: 8000
       targetPort: 8000
+      nodePort: 30090

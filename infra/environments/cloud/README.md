@@ -42,6 +42,8 @@ No resources.
 
 | Name | Description |
 | ---- | ----------- |
+| <a name="output_dlq_arn"></a> [dlq\_arn](#output\_dlq\_arn) | ARN of the dead-letter queue |
+| <a name="output_dlq_url"></a> [dlq\_url](#output\_dlq\_url) | URL of the dead-letter queue |
 | <a name="output_queue_arn"></a> [queue\_arn](#output\_queue\_arn) | ARN of the SQS queue |
 | <a name="output_queue_url"></a> [queue\_url](#output\_queue\_url) | URL of the SQS queue |
 <!-- END_TF_DOCS -->

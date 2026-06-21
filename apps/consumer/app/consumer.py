@@ -36,11 +36,15 @@ from app.config import settings
 from app.failure_injection import FailureInjector
 from app.handler import handle_message
 from app.metrics import (
+    DLQ_DEPTH,
     LAST_POLL_TIMESTAMP,
+    LAST_RECEIVE_COUNT,
     LAST_SUCCESS_TIMESTAMP,
     MESSAGE_PROCESSING_DURATION,
+    QUEUE_ATTR_ERRORS,
     QUEUE_DEPTH,
     RECEIVE_ERRORS,
+    REDELIVERIES,
     PrometheusMetrics,
 )
 from app.store import Outcome, check_schema_version
@@ -66,6 +70,7 @@ class SqsConsumer:
         *,
         database_url: str | None = None,
         queue_url: str | None = None,
+        dlq_queue_url: str | None = None,
         endpoint_url: str | None = None,
         aws_region: str | None = None,
         poll_wait_seconds: int | None = None,
@@ -79,6 +84,9 @@ class SqsConsumer:
     ) -> None:
         self._database_url = database_url if database_url is not None else settings.database_url
         self._queue_url = queue_url if queue_url is not None else settings.sqs_queue_url
+        self._dlq_queue_url = (
+            dlq_queue_url if dlq_queue_url is not None else settings.sqs_dlq_queue_url
+        )
         self._endpoint_url = endpoint_url if endpoint_url is not None else settings.sqs_endpoint_url
         self._aws_region = aws_region if aws_region is not None else settings.aws_region
         self._poll_wait = (
@@ -236,8 +244,28 @@ class SqsConsumer:
             config=config,
         )
 
+    def _attrs_client(self):
+        """Eigener SQS-Client NUR fuer GetQueueAttributes (Tiefen) — mit KURZEN
+        Timeouts, damit ein langsames/nicht erreichbares ElasticMQ weder den Poll
+        blockiert noch laenger haengt. Entkoppelt vom Long-Poll-Client."""
+        import boto3  # lazy, wie in der inventory-App
+        from botocore.config import Config
+
+        config = Config(
+            connect_timeout=2,
+            read_timeout=3,
+            retries={"max_attempts": 0},
+        )
+        return boto3.client(
+            "sqs",
+            endpoint_url=self._endpoint_url or None,
+            region_name=self._aws_region,
+            config=config,
+        )
+
     def _run(self) -> None:
         client = self._client()
+        attrs_client = self._attrs_client()
         log.info("consumer started, polling queue")  # KEINE URL/keine Secrets
         while not self._stop.is_set():
             # Readiness-Gate: nach einem DB-Fehler erst wieder pollen, wenn ein
@@ -251,10 +279,17 @@ class SqsConsumer:
                     MaxNumberOfMessages=self._max_messages,
                     WaitTimeSeconds=self._poll_wait,
                     VisibilityTimeout=self._visibility,
+                    # System-Attribut fuer Observability (ApproximateReceiveCount).
+                    # NUR Beobachtung — die DLQ-Verschiebung entscheidet die native
+                    # SQS/ElasticMQ-Redrive-Policy, nicht der Client. AttributeNames
+                    # ist mit ElasticMQ kompatibel.
+                    AttributeNames=["ApproximateReceiveCount"],
                 )
                 # Auch ein LEERER Poll ist ein erfolgreicher Poll -> Freshness halten.
                 self._mark_poll_ok()
-                self._update_depth(client)
+                # Tiefen ueber den separaten Short-Timeout-Client; Fehler hier duerfen
+                # den Loop NICHT stoppen (nur Fehler-Metrik, letzte Gauge-Werte bleiben).
+                self._update_depth(attrs_client)
             except Exception as exc:
                 RECEIVE_ERRORS.inc()
                 log.warning("receive failed: %s", _safe_err(exc))
@@ -275,6 +310,11 @@ class SqsConsumer:
     def _process_message(self, client, message: dict) -> Outcome:
         raw = self._raw_body(message)
         msg_id = message.get("MessageId", "?")
+        receive_count = self._receive_count(message)
+        if receive_count is not None:
+            LAST_RECEIVE_COUNT.set(receive_count)
+            if receive_count > 1:
+                REDELIVERIES.inc()
         start = time.perf_counter()
 
         # Verbindung aus dem Pool. getconn mit check liefert nur lebende Connections;
@@ -317,8 +357,21 @@ class SqsConsumer:
         if store.should_delete(outcome):
             self._last_success = time.time()
             LAST_SUCCESS_TIMESTAMP.set(self._last_success)
-        log.info("message handled: msg_id=%s outcome=%s", msg_id, outcome.value)
+        # Strukturiertes Log: nur sichere Identifikatoren, KEINE Payload/Secrets.
+        log.info("message handled: msg_id=%s outcome=%s receive_count=%s",
+                 msg_id, outcome.value, receive_count if receive_count is not None else "?")
         return outcome
+
+    @staticmethod
+    def _receive_count(message: dict) -> int | None:
+        """Robustes Parsen von ApproximateReceiveCount; None, wenn nicht vorhanden."""
+        raw = (message.get("Attributes") or {}).get("ApproximateReceiveCount")
+        if raw is None:
+            return None
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
 
     def _delete(self, client, message: dict) -> None:
         client.delete_message(
@@ -334,13 +387,24 @@ class SqsConsumer:
         return str(body).encode("utf-8")
 
     def _update_depth(self, client) -> None:
+        self._set_depth(client, self._queue_url, QUEUE_DEPTH)
+        # DLQ-Tiefe nur, wenn konfiguriert. Der Consumer liest/loescht NICHT aus der
+        # DLQ — nur GetQueueAttributes fuer die Tiefen-Metrik.
+        if self._dlq_queue_url:
+            self._set_depth(client, self._dlq_queue_url, DLQ_DEPTH)
+
+    @staticmethod
+    def _set_depth(client, queue_url: str, gauge) -> None:
         try:
             attrs = client.get_queue_attributes(
-                QueueUrl=self._queue_url,
+                QueueUrl=queue_url,
                 AttributeNames=["ApproximateNumberOfMessages"],
             )
-            QUEUE_DEPTH.set(int(attrs["Attributes"]["ApproximateNumberOfMessages"]))
+            gauge.set(int(attrs["Attributes"]["ApproximateNumberOfMessages"]))
         except Exception as exc:
+            # Fehler-Metrik erhoehen, letzten bekannten Gauge-Wert BEIBEHALTEN
+            # (nicht auf 0 setzen) und NICHT propagieren.
+            QUEUE_ATTR_ERRORS.inc()
             log.debug("queue depth update failed: %s", _safe_err(exc))
 
 

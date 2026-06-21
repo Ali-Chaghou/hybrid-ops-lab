@@ -13,10 +13,33 @@ RECEIVE_ERRORS = Counter(
     "Fehlgeschlagene Receive-Aufrufe gegen die Queue.",
 )
 
+# Fehler bei GetQueueAttributes (Tiefen-Update). Entkoppelt vom Receive-Pfad; ein
+# Fehler haelt die letzten bekannten Tiefen-Gauges, bricht aber nichts ab.
+QUEUE_ATTR_ERRORS = Counter(
+    "consumer_queue_attr_errors_total",
+    "Fehlgeschlagene GetQueueAttributes-Aufrufe (Tiefen-Update).",
+)
+
 QUEUE_DEPTH = Gauge(
     "consumer_queue_depth_approximate",
-    "Ungefaehre Anzahl sichtbarer Nachrichten in der Queue.",
+    "Ungefaehre Anzahl sichtbarer Nachrichten in der Main-Queue.",
 )
+
+# DLQ-Tiefe (ueber GetQueueAttributes auf der DLQ; nur wenn SQS_DLQ_QUEUE_URL gesetzt).
+DLQ_DEPTH = Gauge(
+    "consumer_dlq_depth_approximate",
+    "Ungefaehre Anzahl sichtbarer Nachrichten in der Dead-Letter-Queue.",
+)
+
+# Letzter beobachteter ApproximateReceiveCount (niedrig-kardinal: KEIN Label).
+LAST_RECEIVE_COUNT = Gauge(
+    "consumer_last_receive_count",
+    "ApproximateReceiveCount der zuletzt verarbeiteten Nachricht (0 wenn unbekannt).",
+)
+
+# Liveness/Readiness als Gauges, zur Scrape-Zeit gesetzt (1 = ja, 0 = nein).
+CONSUMER_LIVE = Gauge("consumer_live", "1 wenn der Poller-Thread laeuft, sonst 0.")
+CONSUMER_READY = Gauge("consumer_ready", "1 wenn Schema/DB/Poll-Freshness ok, sonst 0.")
 
 # Zeitpunkt der letzten erfolgreich abgeschlossenen Verarbeitung (applied ODER
 # idempotent erkanntes Duplikat) — fuer eine "Consumer macht Fortschritt"-Sicht.
@@ -51,8 +74,9 @@ VALIDATION_FAILURES = Counter(
 DATABASE_FAILURES = Counter("consumer_database_failures_total", "DB-Fehler waehrend der Verarbeitung (kein Effekt, kein Delete).")
 MESSAGE_DELETE_FAILURES = Counter("consumer_message_delete_failures_total", "Delete-Fehler NACH erfolgreichem Commit (Redelivery moeglich).")
 FAILURE_INJECTIONS = Counter("consumer_failure_injections_total", "Ausgeloeste Lab-Failure-Injections (nach Commit, vor Delete).")
-# consumer_redeliveries_total wird erst in Phase 2 nach realer Verifikation von
-# ApproximateReceiveCount gegen ElasticMQ ausgewiesen — hier bewusst noch nicht.
+# Nachrichten, die mehr als einmal zugestellt wurden (ApproximateReceiveCount > 1).
+# Beobachtung, KEINE Routing-Entscheidung — die DLQ-Verschiebung macht SQS/ElasticMQ.
+REDELIVERIES = Counter("consumer_redeliveries_total", "Empfangene Nachrichten mit ApproximateReceiveCount > 1.")
 
 
 class PrometheusMetrics:

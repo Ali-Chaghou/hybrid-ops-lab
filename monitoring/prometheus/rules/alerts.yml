@@ -22,3 +22,105 @@ groups:
         annotations:
           summary: "Strecke nicht erreichbar"
           description: "Blackbox-Probe ueber die Strecke schlaegt seit 1m fehl ({{ $labels.instance }})."
+
+  # Consumer- und Queue-/DLQ-Alarme (Phase 3, Gate D2). Alle expr referenzieren
+  # tatsaechlich vom Consumer exponierte Metriken bzw. das Prometheus-synthetische
+  # up{job="consumer"}. Bewusst grosszuegige for-Dauern, damit kurze Lab-Pausen
+  # (Strecke gedrosselt, kurzer DB-Blip) nicht sofort alarmieren.
+  - name: consumer
+    rules:
+      - alert: ConsumerDown
+        expr: up{job="consumer"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          site: cloud
+        annotations:
+          summary: "Consumer nicht scrapebar/down"
+          description: "Prometheus erreicht den Consumer (job=consumer) seit 2m nicht."
+
+      - alert: ConsumerNotReady
+        expr: consumer_ready == 0
+        for: 5m
+        labels:
+          severity: warning
+          site: cloud
+        annotations:
+          summary: "Consumer nicht ready"
+          description: "consumer_ready=0 seit 5m (Schema/DB/Poll-Freshness nicht erfuellt)."
+
+      - alert: ConsumerReceiveErrors
+        expr: rate(consumer_receive_errors_total[5m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+          site: cloud
+        annotations:
+          summary: "Anhaltende Receive-Fehler"
+          description: "consumer_receive_errors_total steigt seit 10m (Queue/Strecke gestoert?)."
+
+      - alert: ConsumerDBFailures
+        expr: rate(consumer_database_failures_total[5m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+          site: cloud
+        annotations:
+          summary: "Anhaltende DB-Fehler im Consumer"
+          description: "consumer_database_failures_total steigt seit 10m (DB nicht erreichbar?)."
+
+      - alert: ConsumerValidationErrors
+        expr: rate(consumer_validation_failures_total[15m]) > 0
+        for: 15m
+        labels:
+          severity: warning
+          site: cloud
+        annotations:
+          summary: "Validierungsfehler (moegliche Poison Messages)"
+          description: "consumer_validation_failures_total steigt seit 15m; betroffene Nachrichten gehen ueber Redrive in die DLQ."
+
+      - alert: ConsumerIntegrityConflicts
+        expr: rate(consumer_integrity_conflicts_total[15m]) > 0
+        for: 15m
+        labels:
+          severity: warning
+          site: cloud
+        annotations:
+          summary: "Integritaetskonflikte (event_id/movement)"
+          description: "consumer_integrity_conflicts_total steigt seit 15m; betroffene Nachrichten landen via Redrive in der DLQ."
+
+      - alert: ConsumerRedeliveries
+        expr: rate(consumer_redeliveries_total[15m]) > 0
+        for: 15m
+        labels:
+          severity: info
+          site: cloud
+        annotations:
+          summary: "Mehrfach zugestellte Nachrichten"
+          description: "consumer_redeliveries_total steigt seit 15m (ApproximateReceiveCount > 1)."
+
+  - name: queue
+    rules:
+      # Lab-getunte Schwelle: im synthetischen Lab fliessen nur wenige Events, daher
+      # ist > 20 (statt z. B. 100) gewaehlt, um einen echt festhaengenden Consumer/
+      # Publisher zu erkennen, ohne bei kurzer normaler Verarbeitung zu alarmieren.
+      # Bei groesserem Durchsatz hier anpassen. for=10m verhindert Flattern.
+      - alert: MainQueueBacklog
+        expr: consumer_queue_depth_approximate > 20
+        for: 10m
+        labels:
+          severity: warning
+          site: cloud
+        annotations:
+          summary: "Main-Queue staut sich"
+          description: "consumer_queue_depth_approximate > 20 seit 10m (Consumer/Publisher haengt?)."
+
+      - alert: DLQNotEmpty
+        expr: consumer_dlq_depth_approximate > 0
+        for: 5m
+        labels:
+          severity: warning
+          site: cloud
+        annotations:
+          summary: "DLQ enthaelt Nachrichten"
+          description: "consumer_dlq_depth_approximate > 0 seit 5m; Poison Messages pruefen (siehe ADR-007)."

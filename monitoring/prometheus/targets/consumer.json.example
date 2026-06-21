@@ -1,0 +1,3 @@
+[
+  { "targets": ["CONSUMER_METRICS_HOST:30090"], "labels": { "site": "cloud", "app": "inventory-consumer" } }
+]

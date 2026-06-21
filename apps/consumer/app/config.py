@@ -14,6 +14,7 @@ class Settings:
     database_url: str
     sqs_endpoint_url: str
     sqs_queue_url: str
+    sqs_dlq_queue_url: str
     aws_region: str
     poll_wait_seconds: int
     visibility_timeout_seconds: int
@@ -30,6 +31,9 @@ class Settings:
             database_url=os.environ["DATABASE_URL"],
             sqs_endpoint_url=os.getenv("SQS_ENDPOINT_URL", ""),
             sqs_queue_url=os.environ["SQS_QUEUE_URL"],
+            # Optional: nur fuer die DLQ-Tiefen-Metrik (GetQueueAttributes). Leer =
+            # keine DLQ-Tiefe gemeldet. Der Consumer liest/loescht NICHT aus der DLQ.
+            sqs_dlq_queue_url=os.getenv("SQS_DLQ_QUEUE_URL", ""),
             aws_region=os.getenv("AWS_REGION", "eu-central-1"),
             poll_wait_seconds=int(os.getenv("POLL_WAIT_SECONDS", "20")),
             visibility_timeout_seconds=int(os.getenv("VISIBILITY_TIMEOUT_SECONDS", "30")),
