@@ -1,3 +1,5 @@
 # Nur fuer Tests (nicht im Laufzeit-Image). psycopg ist bereits Runtime-Dep.
 -r requirements.txt
 pytest~=9.1
+# Fuer die statischen Compose-/Monitoring-/Wiring-Config-Tests (yaml.safe_load).
+PyYAML~=6.0

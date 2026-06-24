@@ -63,3 +63,6 @@ Thumbs.db
 
 # Monitoring
 monitoring/prometheus/targets/*.json
+
+# Phase-3-Runtime-State (site-dc; vom kontrollierten Upgrade-Skript geschrieben)
+sites/dc/.phase3-runtime/

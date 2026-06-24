@@ -9,28 +9,58 @@
 
 SSH_USER ?= ops
 REMOTE_DIR := ~/hybrid-ops-lab
-RSYNC := rsync -a --exclude '.git' --exclude '.venv' --exclude 'infra'
+# Das Publisher-file_sd-Target wird NIE durch den generischen Code-Sync verteilt
+# (sonst entstuende vor dem disabled-Deployment ein falscher PublisherDown-Alarm).
+# Es wird ausschliesslich nach erfolgreichem Phase-3-Upgrade gezielt installiert.
+RSYNC := rsync -a --exclude '.git' --exclude '.venv' --exclude 'infra' \
+	--exclude 'monitoring/prometheus/targets/publisher.json'
 
 DC := $(SSH_USER)@$(DC_HOST)
 CLOUD := $(SSH_USER)@$(CLOUD_HOST)
 
+PUBLISHER_HOST_PORT ?= 8001
+PHASE3_STATE := sites/dc/.phase3-runtime/state.json
+
 .DEFAULT_GOAL := help
-.PHONY: help check-env sync up down check demo-incident demo-restore
+.PHONY: help check-env render-publisher-target install-publisher-target sync cloud-up phase3-upgrade up down check demo-incident demo-restore
 
 help: ## Diese Hilfe anzeigen
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
-		| awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
+		| awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
 check-env:
 	@test -n "$(DC_HOST)" || { echo "DC_HOST nicht gesetzt - make.env aus make.env.example anlegen."; exit 1; }
 	@test -n "$(CLOUD_HOST)" || { echo "CLOUD_HOST nicht gesetzt - make.env aus make.env.example anlegen."; exit 1; }
 
-sync: check-env ## Code auf beide VMs rsyncen (ohne infra/, .git, .venv)
+render-publisher-target: check-env ## Prometheus-Publisher-Target (file_sd) NUR lokal erzeugen
+	PUBLISHER_METRICS_HOST="$(DC_HOST)" PUBLISHER_HOST_PORT="$(PUBLISHER_HOST_PORT)" \
+		./ops/deploy/render-publisher-target.sh
+
+install-publisher-target: render-publisher-target ## Target lokal erzeugen + NUR die Datei nach site-cloud syncen
+	$(RSYNC) ./monitoring/prometheus/targets/publisher.json \
+		$(CLOUD):$(REMOTE_DIR)/monitoring/prometheus/targets/publisher.json
+
+sync: check-env ## NUR Repository-Code auf beide VMs rsyncen (KEIN Publisher-Target)
 	$(RSYNC) ./ $(DC):$(REMOTE_DIR)/
 	$(RSYNC) ./ $(CLOUD):$(REMOTE_DIR)/
 
-up: sync ## Beide Sites + Monitoring hochfahren und Consumer deployen
-	ssh $(DC) 'cd $(REMOTE_DIR)/sites/dc && docker compose up -d --build'
+cloud-up: sync ## NUR site-cloud + Monitoring + Consumer (kein site-dc, KEIN Publisher-Target)
+	ssh $(CLOUD) 'cd $(REMOTE_DIR)/sites/cloud && docker compose up -d'
+	ssh $(CLOUD) 'cd $(REMOTE_DIR)/monitoring && docker compose up -d'
+	ssh $(CLOUD) 'cd $(REMOTE_DIR) && ./ops/deploy/deploy-consumer.sh'
+
+phase3-upgrade: sync ## Kontrolliertes site-dc Phase-3-Upgrade; Target ERST nach Erfolg installieren
+	ssh $(DC) 'cd $(REMOTE_DIR) && ./ops/deploy/upgrade-phase-3-runtime.sh run'
+	@ssh $(DC) 'cd $(REMOTE_DIR) && python3 ops/deploy/check-phase-3-runtime-state.py $(PHASE3_STATE)' \
+		|| { echo "ABBRUCH: kein Publisher-Target installiert — Phase-3-State nicht complete."; exit 1; }
+	$(MAKE) --no-print-directory install-publisher-target
+
+up: sync ## Stacks starten — site-dc + Publisher-Target NUR nach erfolgreichem Phase-3-State (fail closed)
+	@ssh $(DC) 'cd $(REMOTE_DIR) && python3 ops/deploy/check-phase-3-runtime-state.py $(PHASE3_STATE)' \
+		|| { echo "ABBRUCH: site-dc nicht gestartet, kein Publisher-Target — Phase-3-Runtime-State fehlt/ungueltig."; \
+		     echo "Zuerst 'make phase3-upgrade' ausfuehren (siehe docs/runbook-phase-3-runtime-upgrade.md)."; exit 1; }
+	ssh $(DC) 'cd $(REMOTE_DIR)/sites/dc && docker compose up -d'
+	$(MAKE) --no-print-directory install-publisher-target
 	ssh $(CLOUD) 'cd $(REMOTE_DIR)/sites/cloud && docker compose up -d'
 	ssh $(CLOUD) 'cd $(REMOTE_DIR)/monitoring && docker compose up -d'
 	ssh $(CLOUD) 'cd $(REMOTE_DIR) && ./ops/deploy/deploy-consumer.sh'

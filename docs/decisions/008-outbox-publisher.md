@@ -89,9 +89,36 @@ Publisher-Service in `sites/dc/docker-compose.yml`, Queue-/Netzwerk-Route für
 site-dc, Prometheus-Scrape, Alert-Regeln, Deployment-Skript, Live-Verifikation,
 Aktivierung. `EVENTS_ENABLED` bleibt unverändert; Phase 3 ist nicht aktiviert.
 
+## Gate-D3B1-Ergänzung (Repository-Wiring)
+- **Compose-Service** `publisher` in `sites/dc/docker-compose.yml`: eigenes Image
+  `hol-publisher:dev` (Kontext `apps/publisher`), **`PUBLISHER_ENABLED: "false"` hart
+  kodiert** (keine Env-Substitution), eigene `inventory_publisher`-DSN, **eigene**
+  Publisher-Route-Variablen (`PUBLISHER_SQS_*`, nicht die Inventory-`SQS_*`), Host-Port
+  für /metrics, Healthcheck `/healthz`, `depends_on` db+inventory-migrate; non-root,
+  keine Volumes/Socket/privileged/Host-Net.
+- **Secret-Isolation:** `INVENTORY_PUBLISHER_PASSWORD` geht **nur** an `db-bootstrap`
+  und `publisher`; `.env.example` enthält nur einen leeren Platzhalter. Lab-Grenze:
+  Compose-Env ist in Container-Metadaten sichtbar (Docker Secrets/Secret-Manager wären
+  produktiv vorzuziehen).
+- **Monitoring:** Prometheus-`file_sd`-Job `publisher` + committetes
+  `publisher.json.example`; reale `publisher.json` gitignored und atomar erzeugt
+  (`ops/deploy/render-publisher-target.sh`, Input-validiert). Eigene Alert-Gruppe;
+  **`PublisherDown` via `up{job="publisher"}==0`** (dauerhaftes Target nötig), alle
+  fachlichen Alerts mit `publisher_enabled == 1` gegatet (ein disabled Publisher
+  alarmiert nicht). Backlog-/Age-/Claim-Sicht hängt am lebenden Publisher → keine
+  unabhängige Backlog-Überwachung.
+- **Fail-closed-Guards:** `make up` startet site-dc **nur** nach erfolgreichem,
+  strukturell validiertem Phase-3-State (`check-phase-3-runtime-state.py`); kein
+  Make-Ziel aktiviert den Publisher. **Getrenntes** Upgrade-Skript
+  `ops/deploy/upgrade-phase-3-runtime.sh` (flock, atomarer JSON-State, Resume,
+  Variante B, kein Enable, keine Override-Aktivierung) — `upgrade-site-dc.sh` (Gate A)
+  bleibt byte-identisch.
+- **Getrenntes D3B2-Live-Gate:** tatsächliches Deployment, Migration `0004` live,
+  Monitoring-Verifikation, **bewusste** Aktivierung, E2E-Nachweis, Disable-/Rollback-Test.
+
 ## Konsequenzen
 - Robuste, einfach testbare Publish-Mechanik ohne lange DB-Transaktionen.
 - Duplikate möglich, aber idempotent abgefangen — keine Exactly-once-Zusage.
 - Eine Inventory-Migration `0004` koppelt an `KNOWN_MIGRATIONS` (Inventory lehnt
-  unbekannt-neueres Schema fail closed ab) → Inventory-Rebuild/-Redeploy als
-  Folgeschritt in D3B nötig.
+  unbekannt-neueres Schema fail closed ab) → koordinierter Inventory-Rebuild/-Recreate
+  (Variante B) im Phase-3-Upgrade-Skript.

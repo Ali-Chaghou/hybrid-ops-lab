@@ -44,6 +44,17 @@ scrape_configs:
     file_sd_configs:
       - files: ['/etc/prometheus/targets/consumer.json']
 
+  # Outbox-Publisher (site-dc, Phase 3) ueber file_sd: das reale Target
+  # (site-dc-Host:PUBLISHER_HOST_PORT) wird vom Orchestrator atomar erzeugt
+  # (ops/deploy/render-publisher-target.sh) und steht in der gitignorten
+  # publisher.json — keine echte IP im versionierten Config.
+  # Vorlage: monitoring/prometheus/targets/publisher.json.example.
+  # Das Target muss DAUERHAFT vorhanden sein, damit up{job="publisher"} als
+  # PublisherDown-Signal funktioniert, auch wenn der Prozess ausfaellt.
+  - job_name: publisher
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/publisher.json']
+
   # Blackbox: HTTP-Probe durch die Strecke (Toxiproxy :9326 -> ElasticMQ).
   # Bei aktiver Latenz-Stoerung steigt probe_duration_seconds sichtbar.
   - job_name: blackbox-strecke

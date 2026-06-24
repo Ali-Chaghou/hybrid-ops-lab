@@ -141,36 +141,32 @@ im [Runbook](docs/runbook-phase-2b-upgrade-site-dc.md#resume--read-only-nachveri
 ### Phase 3 — Event-Flow (Consumer-Idempotenz, DLQ, Monitoring)
 
 Phase 3 baut den Weg `event_outbox → separater Publisher → Queue → Consumer` auf.
-Der **Publisher ist noch nicht implementiert**; `EVENTS_ENABLED=false` und Phase 3
-ist **nicht aktiviert**. Wichtige Unterscheidung: **im Repository implementiert &
-gemerged** ist nicht dasselbe wie **live deployed/auf der VM verifiziert**. Gate D1
-und D2 sind im Repository umgesetzt, aber **noch nicht live deployed/verifiziert**.
+`EVENTS_ENABLED=false`, der Publisher ist **standardmäßig deaktiviert** und Phase 3 ist
+**nicht aktiviert**. Wichtige Unterscheidung: **im Repository implementiert & gemerged**
+ist nicht dasselbe wie **live deployed/auf der VM verifiziert**. D1/D2/D3A/D3B1 sind im
+Repository umgesetzt, aber **noch nicht live deployed/verifiziert**.
 
 | Gate | Inhalt | Stand |
 |---|---|---|
 | Gate A / Phase 2B | Transactional Outbox, kontrollierter site-dc-Upgrade | ✅ abgeschlossen & verifiziert |
 | Gate D1 | idempotente Consumer-Runtime (Inbox/Projection verdrahtet, Commit vor Queue-Delete, Transport-/Business-Duplikate erkannt, Konflikte/Fehler fail closed) | 🔧 im Repo gemerged · ⛔ nicht live deployed |
 | Gate D2 | Main Queue + DLQ, native Redrive-Policy (`maxReceiveCount = 5`), Poison-Message-Policy, Consumer-/Queue-/DLQ-Metriken & Alerts, reproduzierbarer Scrape-Pfad | 🔧 im Repo gemerged · ⛔ nicht live deployed |
-| Gate D3 / Outbox-Publisher | separater Publisher (Outbox → Queue) | ⬜ nächster Schritt, nicht implementiert |
+| Gate D3A | lease-basierter Outbox-Publisher-Kern (Claim/Fencing, einzelnes SendMessage, eigene Least-Privilege-Rolle, Migration `0004`, disabled by default) | 🔧 im Repo gemerged · ⛔ nicht live deployed |
+| Gate D3B1 | Publisher-Service-Wiring (Compose disabled), Secret-Isolation, Route-Config, Prometheus-Scrape + enabled-gated Alerts, kontrolliertes Upgrade-Skript + Fail-closed-Guards | 🔧 im aktuellen Branch implementiert · ⛔ nicht live deployed |
+| Gate D3B2 | kontrollierter Live-Rollout + bewusste Aktivierung + E2E-Nachweis | ⬜ ausstehend |
 | Phase 3 gesamt | Event-Versand aktiviert | ⛔ nicht aktiviert (`EVENTS_ENABLED=false`) |
 
-Details: [Idempotenz](docs/idempotency.md) (Gate D1) und
-[ADR-007](docs/decisions/007-dlq-and-redrive.md) (Gate D2). Gate D1/D2 sind
-**nicht** produktiv, live oder vollständig ausgerollt.
+Details: [Idempotenz](docs/idempotency.md) (D1), [ADR-007](docs/decisions/007-dlq-and-redrive.md)
+(D2), [ADR-008](docs/decisions/008-outbox-publisher.md) (D3A/D3B1) und das
+[Phase-3-Runtime-Upgrade-Runbook](docs/runbook-phase-3-runtime-upgrade.md). Nichts davon
+ist produktiv, live oder vollständig ausgerollt.
 
-### Nächster Schritt — Gate D3 (Outbox-Publisher)
+### Nächster Schritt — Gate D3B2 (kontrollierter Live-Rollout)
 
-Konzeptioneller Umfang (noch **nicht** implementiert; hier keine Implementierung als
-vorhanden dargestellt):
-
-- separater Outbox-Publisher **außerhalb** des HTTP-Request-Pfads;
-- eigene Least-Privilege-Datenbankrolle;
-- kontrolliertes Claiming aus `event_outbox`;
-- Publish an SQS/ElasticMQ;
-- Statuswechsel der Outbox-Zeile **erst nach bestätigtem Publish**;
-- Retry/Backoff und Metriken;
-- standardmäßig deaktiviert;
-- Tests und Review **vor** einem kontrollierten Deployment.
+Noch **nicht** ausgeführt (kein Live-Zugriff in diesem Stand): D1/D2 live deployen &
+verifizieren, Migration `0004` live (Variante B), Inventory aktualisieren, Publisher
+**disabled** deployen, Monitoring (Scrape + Alerts) prüfen, **bewusste** Aktivierung über
+ein separates Gate, End-to-End-Nachweis über den echten Outbox-Pfad, Disable-/Rollback-Test.
 
 ## Schnellstart
 

@@ -36,6 +36,9 @@ services:
       PG_ADMIN_DSN: "host=db port=5432 user=${POSTGRES_USER} password=${POSTGRES_PASSWORD} dbname=${POSTGRES_DB}"
       INVENTORY_ADMIN_PASSWORD: ${INVENTORY_ADMIN_PASSWORD}
       INVENTORY_APP_PASSWORD: ${INVENTORY_APP_PASSWORD}
+      # Nur Bootstrap (legt inventory_publisher mit Passwort an) und der publisher-
+      # Service erhalten dieses Secret — db-prepare/inventory-migrate/inventory NICHT.
+      INVENTORY_PUBLISHER_PASSWORD: ${INVENTORY_PUBLISHER_PASSWORD}
     depends_on:
       db:
         condition: service_healthy
@@ -103,6 +106,49 @@ services:
     pid: host
     volumes:
       - '/:/host:ro,rslave'
+    restart: unless-stopped
+
+  # Outbox-Publisher (Phase 3, Gate D3B1) — eigenes Image, eigener Prozess, getrennt
+  # von der Inventory-Runtime. IM BASIS-COMPOSE ZWINGEND DEAKTIVIERT: weder dieser
+  # Stack noch das Upgrade-Skript aktivieren den Publisher. Eine Aktivierung erfolgt
+  # erst in D3B2 ueber eine bewusste, separate Override-Datei (hier nicht enthalten).
+  publisher:
+    build:
+      context: ../../apps/publisher
+      dockerfile: Dockerfile
+    image: hol-publisher:dev
+    environment:
+      # Hartkodiert deaktiviert — KEINE Substitution aus dem Environment.
+      PUBLISHER_ENABLED: "false"
+      # Eigene Least-Privilege-DSN (inventory_publisher). Bei disabled wird kein Pool
+      # geoeffnet; die DSN wird erst beim spaeteren Enable genutzt.
+      DATABASE_URL: "host=db port=5432 user=inventory_publisher password=${INVENTORY_PUBLISHER_PASSWORD} dbname=${INVENTORY_DB}"
+      # Eigene Publisher-Route (NICHT die Inventory-SQS-Variablen). Leer = keine Queue.
+      SQS_ENDPOINT_URL: ${PUBLISHER_SQS_ENDPOINT_URL:-}
+      SQS_QUEUE_URL: ${PUBLISHER_SQS_QUEUE_URL:-}
+      AWS_REGION: ${PUBLISHER_AWS_REGION:-eu-central-1}
+      # SYNTHETISCHE Emulator-Credentials NUR fuer ElasticMQ (gleiches oeffentliches
+      # Lab-Muster wie der Consumer): ElasticMQ ignoriert sie, boto3 braucht aber
+      # nicht-leere Werte, sonst durchsucht botocore die Provider-Chain (inkl.
+      # EC2-Metadata) und scheitert beim Enable. KEINE echten Secrets, NICHT
+      # konfigurierbar. Gegen echtes AWS waeren Workload Identity / IAM-Rolle noetig.
+      AWS_ACCESS_KEY_ID: "test"
+      AWS_SECRET_ACCESS_KEY: "test"
+      # Keine Metadata-Abfrage (kein EC2/IMDS-Fallback, kein Timeout).
+      AWS_EC2_METADATA_DISABLED: "true"
+    ports:
+      - "${PUBLISHER_HOST_PORT:-8001}:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz',timeout=3).status==200 else 1)\""]
+      interval: 5s
+      timeout: 4s
+      retries: 12
+      start_period: 5s
+    depends_on:
+      db:
+        condition: service_healthy
+      inventory-migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
 
 volumes:
