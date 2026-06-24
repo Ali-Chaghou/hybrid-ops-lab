@@ -78,8 +78,10 @@ Der k3d-Server-Node nutzt die **eigenständigen** Binärdateien `crictl` und `ct
 sie liefern in diesem k3d-Node keine verwertbare Ausgabe. Der Controller erkennt die
 Tools fail-closed über eine **feste, im Code definierte Kandidatenliste** (per Muster
 validierte absolute Pfade), prüft Node-Erreichbarkeit, Ausführbarkeit, eine harmlose
-`crictl inspecti --help`-Probe, `ctr -n k8s.io images ls -q` und die Existenz des
-`images tag`-Subkommandos. Fehlt/funktioniert ein Werkzeug nicht → **fail closed**
+`crictl inspecti --help`-Probe, `ctr -n k8s.io images ls -q` und die Verfügbarkeit des
+Tagging-Subkommandos via `ctr -n k8s.io images tag --help` (Exit 0, **erzeugt keinen
+Tag**; das echte Tagging erfolgt erst in der Rollback-Sicherung). Fehlt/funktioniert ein
+Werkzeug nicht → **fail closed**
 (**keine** automatische Installation, **kein** stiller Rückfall auf `k3s …`). Das
 **Tool-Gate läuft im Preflight vor dem State-Schreiben** und beim `resume` vor jeder
 Mutation (Queue-Neuerstellung, Build, Migration, Deployment).
@@ -95,11 +97,11 @@ Release-Images; der Identitätsnachweis des **laufenden** alten Pod-Images läuf
 0600-Tempdatei, Manifest-Render, Rollout) — **erst nach** erfolgreicher DB-/Schema-Prüfung.
 **Vor** der Mutation erfasst der Controller deterministisch: Revision, Spec-Image,
 laufende Pod-Image-ID; er bestätigt die laufende Identität über
-`k3s crictl inspecti` und prüft, ob die **vollständige** Pod-`sha256:<64>`-Digest exakt
+`crictl inspecti` und prüft, ob die **vollständige** Pod-`sha256:<64>`-Digest exakt
 zu `status.id` **oder** einem `status.repoDigests`-Eintrag gehört (kein Präfix-/
 Kurzvergleich, **keine Docker-`.Id`**). Das bestätigte Image wird **direkt im
 containerd-Namespace `k8s.io`** unter einem eindeutigen Rollback-Tag
-(`…:rollback-<12hex des Runtime-Digests>`) per `k3s ctr images tag` gesichert
+(`…:rollback-<12hex des Runtime-Digests>`) per `ctr -n k8s.io images tag` gesichert
 (**kein `docker tag`, kein `k3d image import`** für das Legacy-Image) und über CRI erneut
 verifiziert. Existiert der Rollback-Tag bereits, wird nur bei **identischer** CRI-Identität
 weitergefahren, sonst **fail closed** (kein stilles Überschreiben). Fehlt das Image oder
