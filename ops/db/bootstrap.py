@@ -20,11 +20,15 @@ from psycopg import sql
 
 # Feste Rollen. Alle Runtime- UND Admin-Rollen sind bewusst keine Cluster-
 # Superuser und duerfen keine Rollen/DBs anlegen oder RLS umgehen.
-RUNTIME_ROLES = ("consumer_app", "inventory_app")
+# inventory_publisher (Phase 3, Gate D3A): getrennte Least-Privilege-Rolle des
+# Outbox-Publishers; ihre Tabellenrechte erteilt Migration 0004 (nach dem Bootstrap).
+RUNTIME_ROLES = ("consumer_app", "inventory_app", "inventory_publisher")
 ADMIN_ROLES = ("consumer_admin", "inventory_admin")
 ALL_ROLES = ADMIN_ROLES + RUNTIME_ROLES
 
-_ATTRS = "LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS"
+# NOREPLICATION ist der sichere Default fuer ALLE diese Rollen (keine darf
+# Replikationsstroeme anzapfen).
+_ATTRS = "LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION"
 
 # Offensichtliche Platzhalter, die fuer eine reale Ausfuehrung nicht erlaubt sind.
 _PLACEHOLDERS = {"change-me", "changeme", "change-me-local", "changeme123", "password", "secret"}

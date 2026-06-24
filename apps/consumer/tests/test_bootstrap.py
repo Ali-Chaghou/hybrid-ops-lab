@@ -34,6 +34,21 @@ def test_runtime_roles_are_least_privilege(pg_server):
             assert rolcanlogin is True
 
 
+def test_roles_have_no_replication(pg_server):
+    # NOREPLICATION wird gegen die ECHTE Datenbank verifiziert (pg_roles.rolreplication),
+    # nicht per Source-/Text-Assertion. Deckt u. a. die D3A-Publisher-Rolle ab.
+    expected = {"inventory_admin", "inventory_app", "inventory_publisher",
+                "consumer_admin", "consumer_app"}
+    assert expected <= set(bootstrap.ALL_ROLES)  # alle geforderten Rollen werden verwaltet
+    bootstrap.ensure_roles(pg_server["maint"])
+    with psycopg.connect(pg_server["maint"]) as c:
+        for role in bootstrap.ALL_ROLES:
+            rolreplication = c.execute(
+                "SELECT rolreplication FROM pg_roles WHERE rolname=%s", (role,)
+            ).fetchone()[0]
+            assert rolreplication is False, role
+
+
 def test_idempotent_second_run(pg_server):
     bootstrap.ensure_roles(pg_server["maint"])
     bootstrap.ensure_roles(pg_server["maint"])  # zweiter Lauf darf nicht scheitern

@@ -87,6 +87,7 @@ def test_upgrade_with_reassign_succeeds_and_backfills(pg_server):
         "0001_create_stock_movements",
         "0002_add_stable_event_id",
         "0003_create_event_outbox",
+        "0004_add_outbox_claim_fields",
     ]
 
     with psycopg.connect(admin_dsn, row_factory=dict_row) as c:
