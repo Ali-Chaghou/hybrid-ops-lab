@@ -124,3 +124,111 @@ groups:
         annotations:
           summary: "DLQ enthaelt Nachrichten"
           description: "consumer_dlq_depth_approximate > 0 seit 5m; Poison Messages pruefen (siehe ADR-007)."
+
+  # Outbox-Publisher (Phase 3, Gate D3B1). Alle expr referenzieren ausschliesslich
+  # tatsaechlich vom Publisher exponierte Metriken bzw. up{job="publisher"}.
+  # WICHTIG (Disabled-Gating): Ein DEAKTIVIERTER Publisher (publisher_enabled=0) ist
+  # gesund-idle und darf KEINE fachlichen Alerts ausloesen. Alle fachlichen Regeln
+  # sind daher mit `publisher_enabled == 1` gegatet. Die Backlog-/Age-/Claim-Gauges
+  # werden vom Publisher gesetzt und verschwinden bei Prozessausfall -> dafuer ist
+  # PublisherDown (up==0) das primaere Signal (dauerhaftes file_sd-Target noetig).
+  - name: publisher
+    rules:
+      - alert: PublisherDown
+        # up bleibt vorhanden, solange das file_sd-Target existiert; bei Prozess-
+        # ausfall verschwinden die publisher_*-Gauges, weshalb up das primaere
+        # Ausfallsignal ist. Der disabled-aber-laufende Publisher hat up==1.
+        expr: up{job="publisher"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          site: dc
+        annotations:
+          summary: "Publisher nicht scrapebar/down"
+          description: "Prometheus erreicht den Publisher (job=publisher) seit 2m nicht."
+
+      - alert: PublisherEnabledNotReady
+        expr: publisher_enabled == 1 and publisher_ready == 0
+        for: 5m
+        labels:
+          severity: warning
+          site: dc
+        annotations:
+          summary: "Publisher aktiviert, aber nicht ready"
+          description: "publisher_enabled=1 und publisher_ready=0 seit 5m (DB/Schema nicht ok)."
+
+      - alert: PublisherPollErrors
+        expr: rate(publisher_poll_errors_total[5m]) > 0 and publisher_enabled == 1
+        for: 10m
+        labels:
+          severity: warning
+          site: dc
+        annotations:
+          summary: "Anhaltende Poll-/DB-Fehler im Publisher"
+          description: "publisher_poll_errors_total steigt seit 10m (DB/Claim gestoert?)."
+
+      - alert: PublisherPublishErrors
+        expr: rate(publisher_publish_errors_total[5m]) > 0 and publisher_enabled == 1
+        for: 10m
+        labels:
+          severity: warning
+          site: dc
+        annotations:
+          summary: "Anhaltende Publish-Fehler"
+          description: "publisher_publish_errors_total steigt seit 10m (Queue/Strecke gestoert?)."
+
+      - alert: PublisherFinalizeConflicts
+        expr: rate(publisher_finalize_conflicts_total[15m]) > 0 and publisher_enabled == 1
+        for: 15m
+        labels:
+          severity: warning
+          site: dc
+        annotations:
+          summary: "Finalize-/Fencing-Konflikte"
+          description: "publisher_finalize_conflicts_total steigt seit 15m (stale Claims / Lease-Overlap)."
+
+      - alert: PublisherBacklogStuck
+        # Aktiviert, Backlog vorhanden, aber ueber 15m KEIN Publish-Fortschritt.
+        expr: publisher_enabled == 1 and publisher_available_pending > 20 and rate(publisher_publish_success_total[15m]) == 0
+        for: 15m
+        labels:
+          severity: warning
+          site: dc
+        annotations:
+          summary: "Outbox-Backlog ohne Fortschritt"
+          description: "publisher_available_pending > 20 und kein erfolgreicher Publish seit 15m (Publisher haengt?)."
+
+      - alert: PublisherOldestPendingAge
+        # Lab-Schwelle 600s: deutlich ueber Lease (60s) + Backoff-Maximum (300s),
+        # erkennt also echt liegengebliebene Zeilen, nicht normalen Retry-Backoff.
+        expr: publisher_enabled == 1 and publisher_oldest_available_age_seconds > 600
+        for: 10m
+        labels:
+          severity: warning
+          site: dc
+        annotations:
+          summary: "Aelteste publizierbare Outbox-Zeile zu alt"
+          description: "publisher_oldest_available_age_seconds > 600 seit 10m."
+
+      - alert: PublisherHighRetries
+        # Niedrige, nicht flatternde Lab-Schwelle: anhaltende Retry-Rate ueber 15m.
+        expr: rate(publisher_retries_total[15m]) > 0.05 and publisher_enabled == 1
+        for: 15m
+        labels:
+          severity: info
+          site: dc
+        annotations:
+          summary: "Ungewoehnlich viele Retries"
+          description: "publisher_retries_total steigt anhaltend (rate > 0.05/s ueber 15m)."
+
+      - alert: PublisherStaleClaims
+        # claimed_rows sollte nur transient > 0 sein (Lease 60s). >0 ueber 3m =
+        # deutlich laenger als die Lease -> festhaengende Claims.
+        expr: publisher_enabled == 1 and publisher_claimed_rows > 0
+        for: 3m
+        labels:
+          severity: warning
+          site: dc
+        annotations:
+          summary: "Geclaimte Zeilen laenger als die Lease"
+          description: "publisher_claimed_rows > 0 seit 3m (deutlich laenger als die 60s-Lease)."

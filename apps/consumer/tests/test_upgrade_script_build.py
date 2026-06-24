@@ -25,11 +25,21 @@ def test_does_not_build_inventory_service():
     assert "dc build inventory" not in TEXT
 
 
-def test_only_db_bootstrap_has_build_section():
-    # Sanity gegen die Compose-Datei: db-bootstrap ist der einzige Service mit build:.
-    compose = COMPOSE.read_text(encoding="utf-8")
-    assert "build:" in compose
-    assert compose.count("build:") == 1
+def test_only_db_bootstrap_builds_the_inventory_image():
+    # Das INVENTORY-Image (hol-inventory:dev) wird genau EINMAL gebaut (db-bootstrap);
+    # die uebrigen Inventory-Image-Services referenzieren es nur. Der Publisher hat
+    # bewusst ein EIGENES Image (hol-publisher:dev) mit eigenem build: — das ist kein
+    # zweiter Build des Inventory-Images.
+    import pytest
+    yaml = pytest.importorskip("yaml")
+    services = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))["services"]
+    inv_builders = [n for n, s in services.items()
+                    if isinstance(s, dict) and "build" in s and s.get("image") == "hol-inventory:dev"]
+    assert inv_builders == ["db-bootstrap"]
+    # Jeder build:-Service baut entweder das Inventory- ODER das Publisher-Image.
+    for name, s in services.items():
+        if isinstance(s, dict) and "build" in s:
+            assert s.get("image") in ("hol-inventory:dev", "hol-publisher:dev"), name
 
 
 def test_image_verification_runs_before_stop():

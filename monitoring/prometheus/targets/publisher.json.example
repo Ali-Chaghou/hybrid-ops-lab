@@ -1,0 +1,3 @@
+[
+  { "targets": ["PUBLISHER_METRICS_HOST:8001"], "labels": { "site": "dc", "app": "outbox-publisher" } }
+]
