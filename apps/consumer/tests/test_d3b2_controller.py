@@ -34,8 +34,8 @@ if [ "$1" = "exec" ]; then
     "test -x "*ctr)    [ "${FAKE_NO_CTR:-0}" = "1" ] && exit 1; exit 0 ;;
     *"inspecti --help"*) [ "${FAKE_CRICTL_PROBE_FAIL:-0}" = "1" ] && exit 1; exit 0 ;;
     *"images ls -q"*) [ "${FAKE_CTR_LS_FAIL:-0}" = "1" ] && exit 1; echo "x"; exit 0 ;;
-    *"images tag") [ "${FAKE_NO_TAG_SUBCMD:-0}" = "1" ] && exit 1; exit 0 ;;   # Subkommando-Probe (No-op)
-    *"images tag "*) touch "${CTR_TAG_MARKER}"; exit "${FAKE_CTR_RC:-0}" ;;     # echtes Tagging (mit Refs)
+    *"images tag --help"*) [ "${FAKE_NO_TAG_SUBCMD:-0}" = "1" ] && exit 1; exit 0 ;;   # Help-Probe (kein Tag)
+    *"images tag "*) touch "${CTR_TAG_MARKER}"; exit "${FAKE_CTR_RC:-0}" ;;            # echtes Tagging (mit Refs)
     *"inspecti -o json"*)
       ref="${@: -1}"
       case "$ref" in
@@ -202,6 +202,22 @@ def test_uses_plain_crictl_ctr_not_k3s_wrappers(tmp_path):
     # k8s.io-Namespace explizit; Detection-Probes vorhanden.
     assert "test -x /bin/crictl" in log and "test -x /bin/ctr" in log
     assert "/bin/ctr -n k8s.io images ls -q" in log
+
+
+def test_tag_subcommand_probe_uses_help_not_bare(tmp_path):
+    env, cmdlog, _ = _setup(tmp_path)
+    assert _run(env, "run").returncode == 0
+    log = cmdlog.read_text()
+    # Help-Probe (Exit 0, kein Tag) — KEIN nackter No-Argument-Probeaufruf.
+    assert "/bin/ctr -n k8s.io images tag --help" in log
+    import re
+    # Es darf KEINE 'images tag'-Zeile OHNE folgende Referenz/--help geben.
+    for line in log.splitlines():
+        if "images tag" in line:
+            assert re.search(r"images tag (--help|\S+ \S+)", line), line
+    # Die Help-Probe enthaelt keine source/target-Referenz (kein docker.io/...).
+    probe = [l for l in log.splitlines() if "images tag --help" in l][0]
+    assert "docker.io/library/inventory-consumer" not in probe
 
 
 @pytest.mark.parametrize("flag", ["FAKE_NO_CRICTL", "FAKE_NO_CTR", "FAKE_CRICTL_PROBE_FAIL",

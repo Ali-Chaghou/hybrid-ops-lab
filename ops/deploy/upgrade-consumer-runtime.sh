@@ -84,11 +84,12 @@ detect_runtime_tools() {
   [ -n "${CRICTL_BIN}" ] || fail "kein funktionsfaehiges crictl im k3d-Node (kein Rueckfall auf 'k3s crictl')."
   for c in ${_CTR_CANDIDATES}; do
     printf '%s' "$c" | grep -Eq '^(/[A-Za-z0-9._-]+)+$' || continue
-    # k8s.io lesbar UND 'images tag'-Subkommando vorhanden (Aufruf ohne Refs ist ein
-    # No-op mit Usage; erzeugt KEINEN Tag).
+    # k8s.io lesbar UND 'images tag'-Subkommando vorhanden. Harmlose Help-Probe
+    # (Exit 0); KEINE Image-Referenzen, erzeugt KEINEN Tag, keine Mutation. (Der
+    # No-Argument-Aufruf endet non-zero mit Usage und ist als Probe ungeeignet.)
     if docker exec "${K3D_NODE}" test -x "$c" >/dev/null 2>&1 \
        && docker exec "${K3D_NODE}" "$c" -n k8s.io images ls -q >/dev/null 2>&1 \
-       && docker exec "${K3D_NODE}" "$c" -n k8s.io images tag >/dev/null 2>&1; then CTR_BIN="$c"; break; fi
+       && docker exec "${K3D_NODE}" "$c" -n k8s.io images tag --help >/dev/null 2>&1; then CTR_BIN="$c"; break; fi
   done
   [ -n "${CTR_BIN}" ] || fail "kein funktionsfaehiges ctr (k8s.io + tag) im k3d-Node (kein Rueckfall auf 'k3s ctr')."
   log "Runtime-Tools erkannt (crictl/ctr im k3d-Node; keine 'k3s'-Wrapper)."
