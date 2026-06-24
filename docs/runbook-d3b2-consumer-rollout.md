@@ -72,12 +72,24 @@ fail closed). Der State speichert `release_sha` + `runtime_image_tag`; **`resume
 akzeptiert nur denselben Release** (Mismatch/fehlender SHA → fail closed). Das
 Setup-Image `hol-consumer:dev` bleibt separat für Bootstrap/Migration.
 
+## Runtime-Werkzeuge im k3d-Node (crictl/ctr, kein `k3s`-Wrapper)
+Der k3d-Server-Node nutzt die **eigenständigen** Binärdateien `crictl` und `ctr`
+(`/bin/crictl`, `/bin/ctr`). **`k3s crictl` / `k3s ctr` werden NICHT angenommen** —
+sie liefern in diesem k3d-Node keine verwertbare Ausgabe. Der Controller erkennt die
+Tools fail-closed über eine **feste, im Code definierte Kandidatenliste** (per Muster
+validierte absolute Pfade), prüft Node-Erreichbarkeit, Ausführbarkeit, eine harmlose
+`crictl inspecti --help`-Probe, `ctr -n k8s.io images ls -q` und die Existenz des
+`images tag`-Subkommandos. Fehlt/funktioniert ein Werkzeug nicht → **fail closed**
+(**keine** automatische Installation, **kein** stiller Rückfall auf `k3s …`). Das
+**Tool-Gate läuft im Preflight vor dem State-Schreiben** und beim `resume` vor jeder
+Mutation (Queue-Neuerstellung, Build, Migration, Deployment).
+
 ## Consumer-Rollout & deterministischer Rollback (CRI/containerd als Source of Truth)
 **Wichtig:** Docker- und containerd-Image-IDs sind **keine vergleichbare
 Identitätsdomäne** — selbst bei inhaltsgleichem Image unterscheiden sie sich. Der
 Docker-Daemon dient daher **ausschließlich** dem Bauen und k3d-Import des **neuen**
 Release-Images; der Identitätsnachweis des **laufenden** alten Pod-Images läuft
-**ausschließlich über CRI/containerd** im k3d-Server-Node.
+**ausschließlich über CRI/containerd** (`crictl`/`ctr`) im k3d-Server-Node.
 
 `deploy-consumer.sh` (Build Runtime-Image mit Release-Tag, k3d-Import, Secret via
 0600-Tempdatei, Manifest-Render, Rollout) — **erst nach** erfolgreicher DB-/Schema-Prüfung.

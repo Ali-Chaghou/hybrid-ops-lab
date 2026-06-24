@@ -43,9 +43,16 @@ DEPLOY="inventory-consumer"
 CONTAINER="consumer"
 CONSUMER_DB_NAME="${CONSUMER_DB:-consumer}"
 # k3d-Server-Node = Quelle der Wahrheit fuer laufende Pod-Images (containerd/CRI).
-# Ueberschreibbar fuer Tests.
+# Ueberschreibbar fuer Tests, aber Name wird gegen ein enges Muster validiert.
 K3D_NODE="${D3B2_K3D_NODE:-k3d-site-cloud-server-0}"
 CRI_ID_HELPER="${REPO_ROOT}/ops/deploy/cri-image-identity.py"
+# Der k3d-Node nutzt die EIGENSTAENDIGEN Binaries crictl/ctr (NICHT 'k3s crictl' /
+# 'k3s ctr' — die liefern im k3d-Node keine verwertbare Ausgabe). Feste, im Code
+# definierte Kandidaten-Pfade; per Muster validiert; Funktion explizit geprueft.
+_CRICTL_CANDIDATES="/bin/crictl /usr/bin/crictl /usr/local/bin/crictl"
+_CTR_CANDIDATES="/bin/ctr /usr/bin/ctr /usr/local/bin/ctr"
+CRICTL_BIN=""   # gesetzt durch detect_runtime_tools (fail closed)
+CTR_BIN=""
 
 log()  { printf '\n[d3b2-consumer] %s\n' "$*"; }
 fail() { printf '\n[d3b2-consumer] FEHLER: %s\n' "$*" >&2; exit 1; }
@@ -59,10 +66,41 @@ validate_release_sha() {
   case "${ACK_RESTARTS}" in 0|1) ;; *) fail "D3B2_ACK_CONSUMER_RESTARTS nur 0 oder 1." ;; esac
 }
 
+# Fail-closed Erkennung der eigenstaendigen Runtime-Binaries im k3d-Node. Prueft
+# Node-Erreichbarkeit, Existenz/Ausfuehrbarkeit + Funktion von crictl und ctr
+# (inkl. k8s.io-Lesbarkeit und Tag-Subkommando). KEINE Installation, KEIN stiller
+# Rueckfall auf 'k3s crictl'/'k3s ctr'. Keine Image-Liste/Registry im Log.
+detect_runtime_tools() {
+  [ -n "${CRICTL_BIN}" ] && [ -n "${CTR_BIN}" ] && return 0   # idempotent
+  printf '%s' "${K3D_NODE}" | grep -Eq '^[A-Za-z0-9._-]+$' || fail "ungueltiger k3d-Node-Name."
+  docker inspect -f '{{.State.Status}}' "${K3D_NODE}" >/dev/null 2>&1 \
+    || fail "k3d-Server-Node nicht vorhanden/erreichbar."
+  local c
+  for c in ${_CRICTL_CANDIDATES}; do
+    printf '%s' "$c" | grep -Eq '^(/[A-Za-z0-9._-]+)+$' || continue
+    if docker exec "${K3D_NODE}" test -x "$c" >/dev/null 2>&1 \
+       && docker exec "${K3D_NODE}" "$c" inspecti --help >/dev/null 2>&1; then CRICTL_BIN="$c"; break; fi
+  done
+  [ -n "${CRICTL_BIN}" ] || fail "kein funktionsfaehiges crictl im k3d-Node (kein Rueckfall auf 'k3s crictl')."
+  for c in ${_CTR_CANDIDATES}; do
+    printf '%s' "$c" | grep -Eq '^(/[A-Za-z0-9._-]+)+$' || continue
+    # k8s.io lesbar UND 'images tag'-Subkommando vorhanden (Aufruf ohne Refs ist ein
+    # No-op mit Usage; erzeugt KEINEN Tag).
+    if docker exec "${K3D_NODE}" test -x "$c" >/dev/null 2>&1 \
+       && docker exec "${K3D_NODE}" "$c" -n k8s.io images ls -q >/dev/null 2>&1 \
+       && docker exec "${K3D_NODE}" "$c" -n k8s.io images tag >/dev/null 2>&1; then CTR_BIN="$c"; break; fi
+  done
+  [ -n "${CTR_BIN}" ] || fail "kein funktionsfaehiges ctr (k8s.io + tag) im k3d-Node (kein Rueckfall auf 'k3s ctr')."
+  log "Runtime-Tools erkannt (crictl/ctr im k3d-Node; keine 'k3s'-Wrapper)."
+}
+
+_ensure_tools() { detect_runtime_tools; }
+
 # CRI/containerd-Operationen im k3d-Node (Source of Truth fuer laufende Pod-Images).
-# Feste Argumentstrukturen; nie eine ganze Befehlszeile aus State/Env ausfuehren.
-cri_inspect() { docker exec "${K3D_NODE}" k3s crictl inspecti -o json "$1" 2>/dev/null || true; }
-ctr_tag()     { docker exec "${K3D_NODE}" k3s ctr -n k8s.io images tag "$1" "$2"; }
+# Feste Argumentstrukturen, getrennte Argumente, kein eval, nie eine ganze
+# Befehlszeile aus State/Env. Eigenstaendige crictl/ctr-Binaries (kein 'k3s ...').
+cri_inspect() { _ensure_tools; docker exec "${K3D_NODE}" "${CRICTL_BIN}" inspecti -o json "$1" 2>/dev/null || true; }
+ctr_tag()     { _ensure_tools; docker exec "${K3D_NODE}" "${CTR_BIN}" -n k8s.io images tag "$1" "$2"; }
 
 dc()  { docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" "$@"; }
 mon() { docker compose -f "${MON_COMPOSE}" "$@"; }
@@ -181,6 +219,8 @@ preflight() {
   for t in docker k3d kubectl curl python3; do need "$t"; done
   docker compose version >/dev/null 2>&1 || fail "docker compose nicht verfuegbar"
   k3d cluster list 2>/dev/null | grep -q . || fail "kein k3d-Cluster gefunden"
+  # Runtime-Tool-Gate VOR State-Schreiben/Mutation: crictl/ctr im k3d-Node funktionsfaehig.
+  detect_runtime_tools
   # NodePort 30090 auf Host veroeffentlicht (sonst kein Consumer-Scrape).
   docker port "k3d-site-cloud-server-0" "30090/tcp" >/dev/null 2>&1 \
     || fail "Consumer-NodePort 30090 nicht auf den Host veroeffentlicht (create-site-cloud-cluster.sh)"
@@ -429,6 +469,8 @@ _run_from() {
 }
 
 cmd_run() {
+  # detect_runtime_tools laeuft im fresh-run ueber preflight (vor jeder Mutation);
+  # ein No-op-Lauf auf bereits 'complete' fasst den Node bewusst NICHT an.
   with_lock; validate_release_sha; restart_gate
   if [ -f "${STATE_FILE}" ]; then
     local cur; cur="$(get_step)"
@@ -443,7 +485,7 @@ cmd_run() {
 }
 
 cmd_resume() {
-  with_lock; validate_release_sha; restart_gate
+  with_lock; validate_release_sha; detect_runtime_tools; restart_gate
   [ -f "${STATE_FILE}" ] || fail "Kein State zum Fortsetzen — 'run' verwenden."
   local cur; cur="$(get_step)"
   [ -n "$cur" ] || fail "State-Datei vorhanden, aber unlesbar/korrupt — Abbruch (kein blindes Fortsetzen)."
