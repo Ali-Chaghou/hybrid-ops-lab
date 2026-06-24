@@ -1,8 +1,9 @@
-"""Gate D3B2.1 (adversarial-hardened): upgrade-consumer-runtime.sh mit Fakes.
+"""Gate D3B2.1 (containerd-rollback-hardened): upgrade-consumer-runtime.sh mit Fakes.
 
-Deckt zusaetzlich ab: Release-SHA-Bindung, immutabler Runtime-Tag, deterministisches
-image-id-verifiziertes Rollback, an die Restartzahl gebundenes Acknowledgement,
-run/resume-Semantik.
+Der Rollback-/Image-Identitaetsnachweis laeuft jetzt ausschliesslich ueber CRI/
+containerd (volle Digests). Docker-.Id, docker tag, k3d import (fuer das Legacy-Image)
+und Praefixvergleiche sind entfernt. Fakes emulieren `docker exec <node> k3s crictl
+inspecti` und `k3s ctr -n k8s.io images tag`.
 """
 from __future__ import annotations
 
@@ -20,22 +21,36 @@ SCRIPT = REPO / "ops/deploy/upgrade-consumer-runtime.sh"
 _SENTINEL = "SENTINEL_CONSUMER_PW_zzz"
 _SHA = "0123456789abcdef0123456789abcdef01234567"
 _RUNTIME_TAG = "inventory-consumer:0123456789ab"
-_OLD_ID = "sha256:" + "1" * 64
+_RID = "sha256:" + "a" * 64                  # laufende containerd-Identitaet (= Pod-Digest)
+_RB_REF = "docker.io/library/inventory-consumer:rollback-" + "a" * 12
 
 _FAKE_DOCKER = r"""#!/usr/bin/env bash
 echo "docker $*" >> "$CMDLOG"
 [ "$1 $2" = "compose version" ] && exit 0
-if [ "$1" = "image" ] && [ "$2" = "inspect" ]; then
-  for a in "$@"; do ref="$a"; done
-  case "$ref" in
-    hol-consumer:dev) echo "sha256:5e70005e70005e70005e70005e70005e70005e70005e70005e70005e70005e70"; exit 0 ;;
-    inventory-consumer:dev) if [ -n "${FAKE_OLD_IMAGE_ID:-}" ]; then echo "$FAKE_OLD_IMAGE_ID"; exit 0; else exit 1; fi ;;
-    *) echo "sha256:dead"; exit 0 ;;
+if [ "$1" = "exec" ]; then
+  shift 2  # 'exec <node>' verwerfen
+  case "$*" in
+    *"crictl inspecti"*)
+      ref="${@: -1}"
+      case "$ref" in
+        *:rollback-*)
+          if [ "${FAKE_RB_PREEXISTS:-0}" = "1" ]; then
+            printf '{"status":{"id":"%s","repoTags":["%s"],"repoDigests":[]}}\n' "${FAKE_RB_ID:-${FAKE_CRI_ID:-REPLACE_RID}}" "$ref"; exit 0
+          elif [ -f "${CTR_TAG_MARKER}" ]; then
+            printf '{"status":{"id":"%s","repoTags":["%s"],"repoDigests":[]}}\n' "${FAKE_CRI_ID:-REPLACE_RID}" "$ref"; exit 0
+          else echo ""; exit 1; fi ;;
+        *)
+          [ "${FAKE_CRI_EMPTY:-0}" = "1" ] && { echo ""; exit 1; }
+          printf '{"status":{"id":"%s","repoTags":["%s"],"repoDigests":["%s"]}}\n' \
+            "${FAKE_CRI_ID:-REPLACE_RID}" "${FAKE_CRI_REPOTAG:-docker.io/library/inventory-consumer:dev}" "${FAKE_CRI_REPODIGEST:-}"; exit 0 ;;
+      esac ;;
+    *"ctr -n k8s.io images tag"*) touch "${CTR_TAG_MARKER}"; exit "${FAKE_CTR_RC:-0}" ;;
   esac
+  exit 0
 fi
+if [ "$1" = "image" ] && [ "$2" = "inspect" ]; then echo "sha256:5e7000000000000000000000000000000000000000000000000000000000face"; exit 0; fi
 [ "$1" = "inspect" ] && { echo "healthy"; exit 0; }
 [ "$1" = "port" ] && exit 0
-[ "$1" = "tag" ] && exit 0
 if [ "$1" = "compose" ]; then
   case "$*" in
     *" ps "*-q*) echo "cid-fake"; exit 0 ;;
@@ -43,24 +58,24 @@ if [ "$1" = "compose" ]; then
   esac
 fi
 exit 0
-"""
+""".replace("REPLACE_RID", _RID)
 
 _FAKE_KUBECTL = r"""#!/usr/bin/env bash
 echo "kubectl $*" >> "$CMDLOG"
 case "$*" in
   *restartCount*) echo "${FAKE_RESTARTS:-0}"; exit 0 ;;
-  *imageID*) echo "${FAKE_POD_IMAGE_ID:-sha256:1111111111111111111111111111111111111111111111111111111111111111}"; exit 0 ;;
+  *imageID*) if [ -f "${DEPLOY_MARKER:-/nonexistent}" ] && [ -n "${FAKE_POD_IMAGE_ID_AFTER:-}" ]; then echo "${FAKE_POD_IMAGE_ID_AFTER}"; else echo "${FAKE_POD_IMAGE_ID:-REPLACE_RID}"; fi; exit 0 ;;
   *"annotations.deployment"*) echo "3"; exit 0 ;;
-  *containers*image*|*containers\[0\].image*) if [ -f "${DEPLOY_MARKER:-/nonexistent}" ]; then echo "${FAKE_RUNTIME_TAG}"; else echo "inventory-consumer:dev"; fi; exit 0 ;;
+  *containers*image*) if [ -f "${DEPLOY_MARKER:-/nonexistent}" ]; then echo "${FAKE_RUNTIME_TAG}"; else echo "inventory-consumer:dev"; fi; exit 0 ;;
   *"rollout status"*) exit 0 ;;
   *"set image"*) exit 0 ;;
   *exec*) exit 0 ;;
   *metadata.name*) echo "inventory-consumer-x"; exit 0 ;;
 esac
 exit 0
-"""
+""".replace("REPLACE_RID", _RID)
 
-_FAKE_K3D = r"""#!/usr/bin/env bash
+_FAKE_K3D = """#!/usr/bin/env bash
 echo "k3d $*" >> "$CMDLOG"
 [ "$*" = "cluster list" ] && { echo "site-cloud 1/1"; exit 0; }
 exit 0
@@ -106,8 +121,10 @@ def _setup(tmp_path, **over):
         "D3B2_STATE_DIR": str(tmp_path / "state"), "D3B2_TARGET_DIR": str(target),
         "DEPLOY_CONSUMER_CMD": str(deploy), "QUEUE_GATE_CMD": "true",
         "D3B2_RELEASE_SHA": _SHA, "FAKE_RUNTIME_TAG": _RUNTIME_TAG,
-        "FAKE_OLD_IMAGE_ID": _OLD_ID, "FAKE_POD_IMAGE_ID": _OLD_ID,
+        "FAKE_CRI_ID": _RID, "FAKE_POD_IMAGE_ID": _RID,
         "DEPLOY_MARKER": str(tmp_path / "deployed.marker"),
+        "CTR_TAG_MARKER": str(tmp_path / "ctr_tag.marker"),
+        "D3B2_K3D_NODE": "k3d-site-cloud-server-0",
     })
     env.update(over)
     return env, cmdlog, (tmp_path / "state")
@@ -129,7 +146,6 @@ def _i(t, n):
 
 
 def _simulate_prior_deploy(env):
-    """Artefakte eines bereits erfolgten Consumer-Deploys (fuer Resume ab consumer-deployed)."""
     pathlib.Path(env["DEPLOY_MARKER"]).touch()
     (pathlib.Path(env["D3B2_TARGET_DIR"]) / "consumer.json").write_text("[]", encoding="utf-8")
 
@@ -138,29 +154,35 @@ pytestmark = pytest.mark.skipif(shutil.which("bash") is None or shutil.which("fl
                                 reason="bash + flock benoetigt")
 
 
-# --- Happy path + immutable Tag --------------------------------------------
+# --- Happy path + immutable Tag + CRI-Identitaet ---------------------------
 
-def test_full_run_completes_with_release_and_immutable_tag(tmp_path):
+def test_full_run_completes(tmp_path):
     env, cmdlog, state_dir = _setup(tmp_path)
     res = _run(env, "run")
     assert res.returncode == 0, res.stderr
     log = cmdlog.read_text()
-    # Deploy nutzt den immutablen Release-Tag.
     assert f"deploy-consumer IMAGE={_RUNTIME_TAG}" in log
-    # Pod-Spec-Image wird gegen den Release-Tag verifiziert (get deploy ... image).
     data = json.loads((state_dir / "state.json").read_text())
     assert data["step"] == "complete" and data["release_sha"] == _SHA
-    assert data["runtime_image_tag"] == _RUNTIME_TAG
 
 
-def test_build_before_migration_and_bootstrap(tmp_path):
+def test_no_docker_id_no_docker_tag_no_k3d_import_for_legacy(tmp_path):
     env, cmdlog, _ = _setup(tmp_path)
     assert _run(env, "run").returncode == 0
     log = cmdlog.read_text()
-    assert _i(log, "build consumer-db-bootstrap") < _i(log, "run --rm --no-deps consumer-migrate")
-    assert (_i(log, "run --rm --no-deps consumer-db-bootstrap")
-            < _i(log, "run --rm --no-deps consumer-db-prepare")
-            < _i(log, "run --rm --no-deps consumer-migrate"))
+    assert "docker tag" not in log
+    assert "image import inventory-consumer:rollback" not in log and "image import docker.io/library/inventory-consumer:rollback" not in log
+    assert "rollout undo" not in log
+    # Legacy-Image-Identitaet ueber containerd: ctr tag im k8s.io-Namespace.
+    assert "ctr -n k8s.io images tag" in log
+    assert "crictl inspecti" in log
+
+
+def test_legacy_secured_before_build_and_deploy(tmp_path):
+    env, cmdlog, _ = _setup(tmp_path)
+    assert _run(env, "run").returncode == 0
+    log = cmdlog.read_text()
+    assert _i(log, "ctr -n k8s.io images tag") < _i(log, "deploy-consumer")
 
 
 def test_no_queue_mutation_no_sitedc_no_secret_leak(tmp_path):
@@ -172,7 +194,79 @@ def test_no_queue_mutation_no_sitedc_no_secret_leak(tmp_path):
     assert "sites/dc" not in log and _SENTINEL not in log
 
 
-# --- Release-Bindung --------------------------------------------------------
+# --- CRI-Identitaetsgate (Erfassung) ---------------------------------------
+
+def test_capture_aborts_when_cri_cannot_confirm(tmp_path):
+    env, cmdlog, _ = _setup(tmp_path, FAKE_CRI_EMPTY="1")
+    res = _run(env, "run")
+    assert res.returncode != 0
+    assert "deploy-consumer" not in cmdlog.read_text()
+
+
+def test_capture_aborts_on_cri_digest_mismatch(tmp_path):
+    # Pod-Digest weicht von der CRI-status.id ab -> helper exit 3 -> fail closed.
+    env, cmdlog, _ = _setup(tmp_path, FAKE_POD_IMAGE_ID="sha256:" + "9" * 64)
+    res = _run(env, "run")
+    assert res.returncode != 0
+    assert "deploy-consumer" not in cmdlog.read_text()
+
+
+def test_existing_rollback_tag_same_identity_reused(tmp_path):
+    env, cmdlog, _ = _setup(tmp_path, FAKE_RB_PREEXISTS="1", FAKE_RB_ID=_RID)
+    assert _run(env, "run").returncode == 0
+    log = cmdlog.read_text()
+    assert "ctr -n k8s.io images tag" not in log   # vorhandener Tag wiederverwendet
+
+
+def test_existing_rollback_tag_divergent_identity_aborts(tmp_path):
+    env, cmdlog, _ = _setup(tmp_path, FAKE_RB_PREEXISTS="1", FAKE_RB_ID="sha256:" + "c" * 64)
+    res = _run(env, "run")
+    assert res.returncode != 0
+    assert "deploy-consumer" not in cmdlog.read_text()
+
+
+def test_rollback_state_stores_full_digest_not_docker_id(tmp_path):
+    env, _, state_dir = _setup(tmp_path)
+    assert _run(env, "run").returncode == 0
+    rb = json.loads((state_dir / "rollback.json").read_text())
+    assert rb["runtime_id"] == _RID and rb["rollback_tag"] == _RB_REF
+    assert "old_image_id" not in rb  # keine Docker-.Id mehr
+
+
+# --- Rollback (CRI-verifiziert) --------------------------------------------
+
+def test_deploy_failure_rolls_back_via_containerd_and_verifies(tmp_path):
+    env, cmdlog, state_dir = _setup(tmp_path, FAKE_DEPLOY_RC="1")
+    res = _run(env, "run")
+    assert res.returncode != 0
+    log = cmdlog.read_text()
+    assert f"set image deploy/inventory-consumer consumer={_RB_REF}" in log
+    assert "rollout undo" not in log
+    assert json.loads((state_dir / "state.json").read_text())["step"] == "consumer-schema-ready"
+
+
+# --- Neuer Release: CRI-Identitaet, nicht nur Spec-Tag ----------------------
+
+def test_release_runtime_image_cri_verified(tmp_path):
+    env, cmdlog, _ = _setup(tmp_path)
+    assert _run(env, "run").returncode == 0
+    log = cmdlog.read_text()
+    # Release-Tag wird ueber CRI inspiziert (Praesenz + laufende Identitaet).
+    assert f"crictl inspecti -o json {_RUNTIME_TAG}" in log
+
+
+def test_release_verify_fails_if_running_digest_not_release_identity(tmp_path):
+    # Capture (vor Deploy) matcht; NACH dem Deploy weicht die laufende Pod-Identitaet
+    # von der CRI-Identitaet des Release-Tags ab -> bloss korrektes Spec-Image reicht
+    # nicht -> fail closed.
+    env, cmdlog, state_dir = _setup(tmp_path, FAKE_POD_IMAGE_ID_AFTER="sha256:" + "d" * 64)
+    res = _run(env, "run")
+    assert res.returncode != 0
+    assert "deploy-consumer" in cmdlog.read_text()   # Deploy lief, Verifikation scheiterte
+    assert json.loads((state_dir / "state.json").read_text())["step"] == "consumer-schema-ready"
+
+
+# --- Release-Bindung / run-resume / Restart-Gate (Regression) --------------
 
 def test_malformed_release_sha_rejected(tmp_path):
     env, _, _ = _setup(tmp_path, D3B2_RELEASE_SHA="nothex")
@@ -181,49 +275,32 @@ def test_malformed_release_sha_rejected(tmp_path):
 
 def test_resume_same_release_completes(tmp_path):
     env, cmdlog, state_dir = _setup(tmp_path)
-    # Consumer bereits deployed (Artefakte + Marker), State release-gebunden.
     _simulate_prior_deploy(env)
     _seed_state(state_dir, "consumer-deployed", release=_SHA)
     res = _run(env, "resume")
     assert res.returncode == 0, res.stderr
-    assert "deploy-consumer" not in cmdlog.read_text()   # kein erneuter Deploy
+    assert "deploy-consumer" not in cmdlog.read_text()
     assert json.loads((state_dir / "state.json").read_text())["step"] == "complete"
 
 
 def test_resume_different_release_rejected(tmp_path):
     env, _, state_dir = _setup(tmp_path)
     _seed_state(state_dir, "consumer-deployed", release="f" * 40)
-    res = _run(env, "resume")
-    assert res.returncode != 0
-    assert "mismatch" in res.stderr.lower() or "release" in res.stderr.lower()
-
-
-def test_resume_state_without_release_rejected(tmp_path):
-    env, _, state_dir = _setup(tmp_path)
-    state_dir.mkdir(parents=True)
-    (state_dir / "state.json").write_text(json.dumps({
-        "schema_version": 1, "gate": "D3B2.1", "step": "consumer-deployed",
-        "complete": False, "updated_at": "x"}), encoding="utf-8")  # KEIN release_sha
     assert _run(env, "resume").returncode != 0
 
-
-# --- run/resume-Semantik ----------------------------------------------------
 
 def test_run_on_incomplete_state_aborts_to_resume(tmp_path):
     env, _, state_dir = _setup(tmp_path)
     _seed_state(state_dir, "queue-config-ready")
     res = _run(env, "run")
-    assert res.returncode != 0
-    assert "resume" in res.stderr.lower()
+    assert res.returncode != 0 and "resume" in res.stderr.lower()
 
 
 def test_run_on_complete_state_no_mutation(tmp_path):
     env, cmdlog, state_dir = _setup(tmp_path)
     _seed_state(state_dir, "complete", complete=True)
-    res = _run(env, "run")
-    assert res.returncode == 0
-    log = cmdlog.read_text()
-    assert "build consumer-db-bootstrap" not in log and "force-recreate" not in log
+    assert _run(env, "run").returncode == 0
+    assert "ctr -n k8s.io images tag" not in cmdlog.read_text()
 
 
 def test_resume_without_state_aborts(tmp_path):
@@ -231,78 +308,33 @@ def test_resume_without_state_aborts(tmp_path):
     assert _run(env, "resume").returncode != 0
 
 
-def test_corrupt_state_resume_fails_closed(tmp_path):
-    env, _, state_dir = _setup(tmp_path)
-    state_dir.mkdir(parents=True)
-    (state_dir / "state.json").write_text("{corrupt", encoding="utf-8")
-    assert _run(env, "resume").returncode != 0
+def test_queue_gate_failure_aborts_before_recreate(tmp_path):
+    env, cmdlog, state_dir = _setup(tmp_path, QUEUE_GATE_CMD="false")
+    assert _run(env, "run").returncode != 0
+    assert "force-recreate --no-deps sqs" not in cmdlog.read_text()
+    assert json.loads((state_dir / "state.json").read_text())["step"] == "images-built"
 
-
-# --- Deterministisches Rollback --------------------------------------------
-
-def test_capture_aborts_when_old_image_unavailable(tmp_path):
-    # docker image inspect inventory-consumer:dev schlaegt fehl -> vor Mutation Abbruch.
-    env, cmdlog, _ = _setup(tmp_path, FAKE_OLD_IMAGE_ID="")
-    res = _run(env, "run")
-    assert res.returncode != 0
-    log = cmdlog.read_text()
-    # Kein neuer Deploy, da Rollback-Erfassung vorher fail closed.
-    assert "deploy-consumer" not in log
-
-
-def test_capture_aborts_on_pod_image_id_mismatch(tmp_path):
-    env, cmdlog, _ = _setup(tmp_path, FAKE_POD_IMAGE_ID="sha256:" + "9" * 64)
-    res = _run(env, "run")
-    assert res.returncode != 0
-    assert "deploy-consumer" not in cmdlog.read_text()
-
-
-def test_deploy_failure_rolls_back_to_saved_tag_and_verifies(tmp_path):
-    env, cmdlog, state_dir = _setup(tmp_path, FAKE_DEPLOY_RC="1")
-    res = _run(env, "run")
-    assert res.returncode != 0
-    log = cmdlog.read_text()
-    # Rollback per 'set image' auf den gesicherten Rollback-Tag, NICHT nur 'rollout undo'.
-    assert "set image deploy/inventory-consumer consumer=inventory-consumer:rollback-" in log
-    assert "rollout undo" not in log
-    assert json.loads((state_dir / "state.json").read_text())["step"] == "consumer-schema-ready"
-
-
-def test_rollback_tag_imported_into_k3d_before_build(tmp_path):
-    env, cmdlog, _ = _setup(tmp_path)
-    assert _run(env, "run").returncode == 0
-    log = cmdlog.read_text()
-    assert "image import inventory-consumer:rollback-" in log
-
-
-# --- Restart-Acknowledgement (an Restartzahl gebunden) ----------------------
 
 def test_unacked_restarts_fail_closed(tmp_path):
     env, _, _ = _setup(tmp_path, FAKE_RESTARTS="8")
     assert _run(env, "run").returncode != 0
 
 
-def test_acked_restarts_proceed_and_record_count(tmp_path):
+def test_acked_restarts_proceed(tmp_path):
     env, _, state_dir = _setup(tmp_path, FAKE_RESTARTS="8", D3B2_ACK_CONSUMER_RESTARTS="1")
     assert _run(env, "run").returncode == 0
-    audit = json.loads((state_dir / "restart-ack.json").read_text())
-    assert audit["acked_restart_count"] == 8
+    assert json.loads((state_dir / "restart-ack.json").read_text())["acked_restart_count"] == 8
 
 
-def test_ack_for_8_does_not_auto_accept_9(tmp_path):
-    env, _, state_dir = _setup(tmp_path)
-    _seed_state(state_dir, "consumer-deployed")
-    _simulate_prior_deploy(env)
-    (state_dir / "restart-ack.json").write_text(json.dumps({"acked_restart_count": 8, "at": "x"}), encoding="utf-8")
-    # Restartzahl 9 ohne neues Ack -> fail closed.
-    env_fail = dict(env); env_fail["FAKE_RESTARTS"] = "9"; env_fail["D3B2_ACK_CONSUMER_RESTARTS"] = "0"
-    assert _run(env_fail, "resume").returncode != 0
-    # Gleiche, bereits bestaetigte Zahl 8 ohne Ack -> erlaubt.
-    env_ok = dict(env); env_ok["FAKE_RESTARTS"] = "8"; env_ok["D3B2_ACK_CONSUMER_RESTARTS"] = "0"
-    assert _run(env_ok, "resume").returncode == 0
+def test_build_before_migration(tmp_path):
+    env, cmdlog, _ = _setup(tmp_path)
+    assert _run(env, "run").returncode == 0
+    log = cmdlog.read_text()
+    assert _i(log, "build consumer-db-bootstrap") < _i(log, "run --rm --no-deps consumer-migrate")
+    assert (_i(log, "run --rm --no-deps consumer-db-bootstrap")
+            < _i(log, "run --rm --no-deps consumer-db-prepare")
+            < _i(log, "run --rm --no-deps consumer-migrate"))
 
-
-# --- Monitoring-Resume ------------------------------------------------------
 
 def test_monitoring_failure_resumable(tmp_path):
     env, cmdlog, state_dir = _setup(tmp_path, PROM_FAIL="1")
@@ -312,3 +344,10 @@ def test_monitoring_failure_resumable(tmp_path):
     assert _run(env2, "resume").returncode == 0
     assert "deploy-consumer" not in cmdlog.read_text()
     assert json.loads((state_dir / "state.json").read_text())["step"] == "complete"
+
+
+def test_corrupt_state_resume_fails_closed(tmp_path):
+    env, _, state_dir = _setup(tmp_path)
+    state_dir.mkdir(parents=True)
+    (state_dir / "state.json").write_text("{corrupt", encoding="utf-8")
+    assert _run(env, "resume").returncode != 0

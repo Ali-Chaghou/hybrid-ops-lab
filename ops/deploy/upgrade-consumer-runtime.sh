@@ -42,6 +42,10 @@ NAMESPACE="inventory"
 DEPLOY="inventory-consumer"
 CONTAINER="consumer"
 CONSUMER_DB_NAME="${CONSUMER_DB:-consumer}"
+# k3d-Server-Node = Quelle der Wahrheit fuer laufende Pod-Images (containerd/CRI).
+# Ueberschreibbar fuer Tests.
+K3D_NODE="${D3B2_K3D_NODE:-k3d-site-cloud-server-0}"
+CRI_ID_HELPER="${REPO_ROOT}/ops/deploy/cri-image-identity.py"
 
 log()  { printf '\n[d3b2-consumer] %s\n' "$*"; }
 fail() { printf '\n[d3b2-consumer] FEHLER: %s\n' "$*" >&2; exit 1; }
@@ -55,8 +59,10 @@ validate_release_sha() {
   case "${ACK_RESTARTS}" in 0|1) ;; *) fail "D3B2_ACK_CONSUMER_RESTARTS nur 0 oder 1." ;; esac
 }
 
-# sha256:<hex> aus beliebiger Image-ID-/Digest-Form extrahieren (Normalisierung).
-_norm_id() { printf '%s' "$1" | grep -oE 'sha256:[0-9a-f]{12,64}' | head -1; }
+# CRI/containerd-Operationen im k3d-Node (Source of Truth fuer laufende Pod-Images).
+# Feste Argumentstrukturen; nie eine ganze Befehlszeile aus State/Env ausfuehren.
+cri_inspect() { docker exec "${K3D_NODE}" k3s crictl inspecti -o json "$1" 2>/dev/null || true; }
+ctr_tag()     { docker exec "${K3D_NODE}" k3s ctr -n k8s.io images tag "$1" "$2"; }
 
 dc()  { docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" "$@"; }
 mon() { docker compose -f "${MON_COMPOSE}" "$@"; }
@@ -238,17 +244,36 @@ phase_consumer_deployed() {
     write_state consumer-schema-ready false   # zurueck auf letzten guten Schritt
     fail "Consumer-Rollout fehlgeschlagen — Rollback ausgefuehrt, Resume moeglich."
   fi
-  log "VERIFY: Pod-Spec-Image == Release-Tag, /healthz, /readyz, D1/D2-Metriken"
-  _verify_runtime_image || fail "Laufendes Deployment-Image entspricht nicht dem Release-Tag ${RUNTIME_TAG}"
+  log "VERIFY: Release-Tag im CRI-Store, laufende CRI-Identitaet == Release-Tag, /healthz, /readyz"
+  _verify_release_image_present || fail "Release-Image ${RUNTIME_TAG} nicht im k3d/CRI-Store auffindbar."
+  _verify_runtime_image || fail "Laufendes Image entspricht nicht der CRI-Identitaet des Release-Tags ${RUNTIME_TAG}."
   _verify_consumer_runtime || fail "Consumer-Runtime-Verifikation fehlgeschlagen"
   write_state consumer-deployed false
 }
 
-# Pod-Spec-Image MUSS exakt dem erwarteten immutable Release-Tag entsprechen.
+# Beweist, dass NICHT nur der richtige Tag im Manifest steht, sondern auch die
+# erwarteten importierten Image-Bytes laufen: (1) Spec-Image == Release-Tag,
+# (2) CRI loest den Release-Tag auf, (3) laufende Pod-Image-ID gehoert exakt zur
+# CRI-Identitaet dieses Release-Tags (volle Digests, keine Docker-.Id).
 _verify_runtime_image() {
-  local img
+  local img pod_id
   img="$(kubectl -n "${NAMESPACE}" get deploy/"${DEPLOY}" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo '')"
-  [ "${img}" = "${RUNTIME_TAG}" ]
+  [ "${img}" = "${RUNTIME_TAG}" ] || return 1
+  pod_id="$(kubectl -n "${NAMESPACE}" get pod -l app="${DEPLOY}" -o jsonpath='{.items[0].status.containerStatuses[0].imageID}' 2>/dev/null || echo '')"
+  [ -n "${pod_id}" ] || return 1
+  printf '%s' "$(cri_inspect "${RUNTIME_TAG}")" | python3 "${CRI_ID_HELPER}" "${pod_id}" >/dev/null || return 1
+  return 0
+}
+
+# §7-Vorbedingung: der neue Release-Tag muss VOR dem Deployment im k3d/CRI-Store sein.
+_verify_release_image_present() {
+  local cri
+  cri="$(cri_inspect "${RUNTIME_TAG}")"
+  [ -n "$(printf '%s' "${cri}" | tr -d '[:space:]')" ] || return 1
+  printf '%s' "${cri}" | python3 -c 'import json,sys
+try:
+    d=json.load(sys.stdin); st=d.get("status",{}); print("ok" if st.get("id") else "")
+except Exception: print("")' | grep -q ok
 }
 
 phase_monitoring_ready() {
@@ -312,53 +337,79 @@ _verify_monitoring() {
   return 0
 }
 
-# ---- Rollback (deterministisch, image-id-verifiziert) ------------------------
-# Erfasst VOR jeder Mutation: aktuelle Revision, aktuelles Spec-Image, laufende
-# Pod-Image-ID. Beweist, dass das laufende Image lokal verfuegbar ist (Pod-Image-ID
-# == lokale Docker-Image-ID), sichert es unter einem eindeutigen, immutablen
-# Rollback-Tag und importiert diesen VOR dem Neubau in k3d. Sonst fail closed.
+# ---- Rollback (deterministisch, CRI/containerd-digest-verifiziert) -----------
+# Erfasst VOR jeder Mutation: Revision, Spec-Image, laufende Pod-Image-ID. Beweist
+# die laufende Image-Identitaet AUSSCHLIESSLICH ueber CRI/containerd im k3d-Node
+# (vollstaendige sha256:<64>-Digests, kein Praefix, KEINE Docker-.Id), sichert das
+# bestehende Image DIREKT im containerd-Namespace k8s.io unter einem eindeutigen
+# Rollback-Tag (kein 'docker tag', kein 'k3d image import') und verifiziert ihn
+# erneut ueber CRI. Sonst fail closed.
 _capture_rollback_target() {
   mkdir -p "${STATE_DIR}"
-  local rev img pod_id local_id pid lid rbtag tmp
+  local rev img pod_id cri runtime_id srcref repo rbref exist
   rev="$(kubectl -n "${NAMESPACE}" get deploy/"${DEPLOY}" -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}' 2>/dev/null || echo '')"
   img="$(kubectl -n "${NAMESPACE}" get deploy/"${DEPLOY}" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo '')"
   pod_id="$(kubectl -n "${NAMESPACE}" get pod -l app="${DEPLOY}" -o jsonpath='{.items[0].status.containerStatuses[0].imageID}' 2>/dev/null || echo '')"
-  [ -n "${img}" ] || fail "aktuelles Deployment-Image nicht ermittelbar — Rollback nicht absicherbar"
-  local_id="$(docker image inspect -f '{{.Id}}' "${img}" 2>/dev/null || echo '')"
-  [ -n "${local_id}" ] || fail "altes Image ${img} NICHT lokal verfuegbar — Abbruch VOR Mutation (Rollback nicht garantierbar)."
-  pid="$(_norm_id "${pod_id}")"; lid="$(_norm_id "${local_id}")"
-  [ -n "${pid}" ] && [ -n "${lid}" ] || fail "Image-ID nicht normalisierbar — Rollback nicht absicherbar (fail closed)."
-  # Praefix-Vergleich (Pod-Digest vs. lokale ID, gekuerzt) — bei Abweichung fail closed.
-  case "${pid}" in "${lid}"*) ;; *) case "${lid}" in "${pid}"*) ;; *) fail "laufende Pod-Image-ID weicht vom lokalen alten Image ab — Abbruch (fail closed)." ;; esac ;; esac
-  rbtag="inventory-consumer:rollback-$(printf '%s' "${lid#sha256:}" | cut -c1-12)"
-  docker tag "${img}" "${rbtag}" || fail "Rollback-Tag konnte nicht gesetzt werden"
-  k3d image import "${rbtag}" -c site-cloud >/dev/null 2>&1 || fail "Rollback-Tag-Import in k3d fehlgeschlagen"
-  tmp="$(mktemp "${STATE_DIR}/.rollback.XXXXXX")"
-  REV="${rev:-}" IMG="${img}" OID="${local_id}" RB="${rbtag}" python3 - "$tmp" <<'PY' || { rm -f "$tmp"; fail "Rollback-Ziel nicht serialisierbar"; }
-import json,os,sys
-json.dump({"revision":os.environ.get("REV",""),"old_image":os.environ["IMG"],
-          "old_image_id":os.environ["OID"],"rollback_tag":os.environ["RB"]},open(sys.argv[1],"w"))
+  [ -n "${img}" ] || fail "aktuelles Deployment-Image nicht ermittelbar — Rollback nicht absicherbar."
+  [ -n "${pod_id}" ] || fail "laufende Pod-Image-ID nicht ermittelbar — Rollback nicht absicherbar (fail closed)."
+  # CRI inspiziert das LAUFENDE Image (per Pod-Digest) -> volle containerd-Identitaet.
+  cri="$(cri_inspect "${pod_id}")"
+  runtime_id="$(printf '%s' "${cri}" | python3 "${CRI_ID_HELPER}" "${pod_id}")" \
+    || fail "CRI/containerd kann das laufende alte Image nicht eindeutig bestaetigen — Abbruch (fail closed)."
+  srcref="$(printf '%s' "${cri}" | python3 "${CRI_ID_HELPER}" --source-ref "${pod_id}")" \
+    || fail "keine nutzbare CRI-Quell-Referenz fuer das alte Image — Abbruch (fail closed)."
+  case "${srcref}" in *@*) repo="${srcref%@*}" ;; *:*) repo="${srcref%:*}" ;; *) repo="${srcref}" ;; esac
+  rbref="${repo}:rollback-$(printf '%s' "${runtime_id#sha256:}" | cut -c1-12)"
+  # Existiert der Rollback-Tag schon? Nur fortfahren, wenn er auf dieselbe Identitaet
+  # zeigt — sonst fail closed (kein stilles Ueberschreiben).
+  exist="$(cri_inspect "${rbref}")"
+  if [ -n "$(printf '%s' "${exist}" | tr -d '[:space:]')" ]; then
+    printf '%s' "${exist}" | python3 "${CRI_ID_HELPER}" "${runtime_id}" >/dev/null \
+      || fail "vorhandener Rollback-Tag zeigt auf ABWEICHENDE Identitaet — Abbruch (kein stilles Ueberschreiben)."
+    log "Bestehender Rollback-Tag mit identischer CRI-Identitaet wiederverwendet."
+  else
+    ctr_tag "${srcref}" "${rbref}" >/dev/null 2>&1 \
+      || fail "containerd-Tagging (k8s.io) des Rollback-Images fehlgeschlagen."
+  fi
+  # Verifizieren: Rollback-Tag ueber CRI vorhanden + zeigt auf die laufende Identitaet.
+  printf '%s' "$(cri_inspect "${rbref}")" | python3 "${CRI_ID_HELPER}" "${runtime_id}" >/dev/null \
+    || fail "Rollback-Tag nicht ueber CRI auf die laufende Identitaet verifizierbar — Abbruch."
+  local tmp; tmp="$(mktemp "${STATE_DIR}/.rollback.XXXXXX")"
+  REV="${rev:-}" IMG="${img}" POD="${pod_id}" RID="${runtime_id}" RB="${rbref}" REL="${RELEASE_SHA}" \
+    python3 - "$tmp" <<'PY' || { rm -f "$tmp"; fail "Rollback-Ziel nicht serialisierbar"; }
+import json,os,sys,datetime
+json.dump({"revision":os.environ.get("REV",""),"old_spec_image":os.environ["IMG"],
+          "old_pod_image_id":os.environ["POD"],"runtime_id":os.environ["RID"],
+          "rollback_tag":os.environ["RB"],"release_sha":os.environ["REL"],
+          "at":datetime.datetime.now(datetime.timezone.utc).isoformat()},open(sys.argv[1],"w"))
 PY
   mv -f "$tmp" "${ROLLBACK_FILE}"
-  log "Rollback-Ziel erfasst + gesichert (Revision, alte Image-ID, Rollback-Tag; keine Registry/Hosts)."
+  log "Rollback-Ziel erfasst + im containerd-Store gesichert (volle Digest-Identitaet; keine Docker-.Id, keine Registry/Hosts)."
 }
 
-# Setzt das Deployment explizit auf den gesicherten immutablen Rollback-Tag und
-# VERIFIZIERT die laufende Image-ID gegen die gespeicherte alte ID. 'rollout undo'
-# allein gilt NICHT als Nachweis.
+# Setzt das Deployment explizit auf den containerd-Rollback-Tag und VERIFIZIERT die
+# laufende Identitaet ueber CRI gegen den gespeicherten vollen Runtime-Digest.
+# 'kubectl rollout undo' bleibt ausdruecklich unzureichend und wird NICHT verwendet.
 _rollback_consumer() {
   [ -f "${ROLLBACK_FILE}" ] || { log "kein Rollback-Ziel erfasst — kein Rollback"; return 1; }
-  local rbtag oid newpid
-  rbtag="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("rollback_tag",""))' "${ROLLBACK_FILE}" 2>/dev/null || echo '')"
-  oid="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("old_image_id",""))' "${ROLLBACK_FILE}" 2>/dev/null || echo '')"
-  [ -n "${rbtag}" ] && [ -n "${oid}" ] || { log "Rollback-Tag/alte ID fehlen — kein sicherer Rollback"; return 1; }
-  kubectl -n "${NAMESPACE}" set image deploy/"${DEPLOY}" "${CONTAINER}=${rbtag}" >/dev/null 2>&1 || return 1
+  local rbref rid newpid cid
+  rbref="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("rollback_tag",""))' "${ROLLBACK_FILE}" 2>/dev/null || echo '')"
+  rid="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("runtime_id",""))' "${ROLLBACK_FILE}" 2>/dev/null || echo '')"
+  [ -n "${rbref}" ] || { log "Rollback-Tag fehlt — kein sicherer Rollback"; return 1; }
+  printf '%s' "${rid}" | grep -Eq '^sha256:[0-9a-f]{64}$' || { log "gespeicherter Runtime-Digest ungueltig"; return 1; }
+  # 1/2) Rollback-Tag muss noch ueber CRI vorhanden sein UND auf rid zeigen.
+  printf '%s' "$(cri_inspect "${rbref}")" | python3 "${CRI_ID_HELPER}" "${rid}" >/dev/null \
+    || { log "Rollback-Tag ueber CRI nicht (mehr) auf die gespeicherte Identitaet aufloesbar"; return 1; }
+  # 3/4/5) Deployment explizit setzen, Rollout abwarten, Health/Ready.
+  kubectl -n "${NAMESPACE}" set image deploy/"${DEPLOY}" "${CONTAINER}=${rbref}" >/dev/null 2>&1 || return 1
   kubectl -n "${NAMESPACE}" rollout status deploy/"${DEPLOY}" --timeout=90s >/dev/null 2>&1 || return 1
   _verify_consumer_runtime || return 1
-  newpid="$(_norm_id "$(kubectl -n "${NAMESPACE}" get pod -l app="${DEPLOY}" -o jsonpath='{.items[0].status.containerStatuses[0].imageID}' 2>/dev/null || echo '')")"
-  local oidn; oidn="$(_norm_id "${oid}")"
-  case "${newpid}" in "${oidn}"*) ;; *) case "${oidn}" in "${newpid}"*) ;; *) log "Rollback-Image-ID stimmt NICHT mit der alten ID ueberein — Rollback nicht bestaetigt."; return 1 ;; esac ;; esac
-  log "Rollback bestaetigt: laufendes Image == gespeicherte alte Image-ID."
+  # 6/7/8) Neue Pod-ID muss ueber CRI zur Identitaet des Rollback-Tags (== rid) gehoeren.
+  newpid="$(kubectl -n "${NAMESPACE}" get pod -l app="${DEPLOY}" -o jsonpath='{.items[0].status.containerStatuses[0].imageID}' 2>/dev/null || echo '')"
+  cid="$(printf '%s' "$(cri_inspect "${rbref}")" | python3 "${CRI_ID_HELPER}" "${newpid}")" \
+    || { log "laufende Pod-Identitaet nach Rollback nicht CRI-bestaetigbar"; return 1; }
+  [ "${cid}" = "${rid}" ] || { log "Rollback-Identitaet weicht vom gespeicherten Runtime-Nachweis ab — Rollback NICHT bestaetigt"; return 1; }
+  log "Rollback bestaetigt: laufende containerd-Identitaet == gespeicherter alter Runtime-Digest."
   return 0
 }
 

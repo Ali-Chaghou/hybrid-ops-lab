@@ -72,19 +72,35 @@ fail closed). Der State speichert `release_sha` + `runtime_image_tag`; **`resume
 akzeptiert nur denselben Release** (Mismatch/fehlender SHA → fail closed). Das
 Setup-Image `hol-consumer:dev` bleibt separat für Bootstrap/Migration.
 
-## Consumer-Rollout & deterministischer Rollback
+## Consumer-Rollout & deterministischer Rollback (CRI/containerd als Source of Truth)
+**Wichtig:** Docker- und containerd-Image-IDs sind **keine vergleichbare
+Identitätsdomäne** — selbst bei inhaltsgleichem Image unterscheiden sie sich. Der
+Docker-Daemon dient daher **ausschließlich** dem Bauen und k3d-Import des **neuen**
+Release-Images; der Identitätsnachweis des **laufenden** alten Pod-Images läuft
+**ausschließlich über CRI/containerd** im k3d-Server-Node.
+
 `deploy-consumer.sh` (Build Runtime-Image mit Release-Tag, k3d-Import, Secret via
 0600-Tempdatei, Manifest-Render, Rollout) — **erst nach** erfolgreicher DB-/Schema-Prüfung.
-**Vor** der Mutation erfasst der Controller deterministisch: aktuelle Revision, aktuelles
-Spec-Image, laufende Pod-Image-ID; er **beweist**, dass das laufende Image lokal
-verfügbar ist (Pod-Image-ID == lokale Docker-Image-ID, sonst **fail closed vor jeder
-Mutation**), **sichert** es unter einem eindeutigen immutablen Rollback-Tag
-(`inventory-consumer:rollback-<12hex>`) und **importiert** diesen **vor** dem Neubau in
-k3d. Bei Rollout-Fehler wird das Deployment **explizit per `kubectl set image` auf den
-gesicherten Rollback-Tag** gesetzt, der Rollout abgewartet, Health/Ready geprüft und die
-laufende Image-ID **gegen die gespeicherte alte ID verifiziert** — nur dann gilt der
-Rollback als erfolgreich (`rollout undo` allein genügt **nicht**). **Keine** Löschung von
-DB/Queue, **kein** Purge; State zurück auf den letzten guten Schritt, Resume möglich.
+**Vor** der Mutation erfasst der Controller deterministisch: Revision, Spec-Image,
+laufende Pod-Image-ID; er bestätigt die laufende Identität über
+`k3s crictl inspecti` und prüft, ob die **vollständige** Pod-`sha256:<64>`-Digest exakt
+zu `status.id` **oder** einem `status.repoDigests`-Eintrag gehört (kein Präfix-/
+Kurzvergleich, **keine Docker-`.Id`**). Das bestätigte Image wird **direkt im
+containerd-Namespace `k8s.io`** unter einem eindeutigen Rollback-Tag
+(`…:rollback-<12hex des Runtime-Digests>`) per `k3s ctr images tag` gesichert
+(**kein `docker tag`, kein `k3d image import`** für das Legacy-Image) und über CRI erneut
+verifiziert. Existiert der Rollback-Tag bereits, wird nur bei **identischer** CRI-Identität
+weitergefahren, sonst **fail closed** (kein stilles Überschreiben). Fehlt das Image oder
+ist die Identität widersprüchlich/leer/verkürzt → **fail closed vor jeder Mutation**.
+
+Bei Rollout-Fehler wird das Deployment **explizit per `kubectl set image` auf den
+containerd-Rollback-Tag** gesetzt, der Rollout abgewartet, Health/Ready geprüft und die
+neue laufende Pod-Digest **über CRI gegen den gespeicherten vollen Runtime-Digest**
+verifiziert — nur dann gilt der Rollback als erfolgreich. **`kubectl rollout undo` bleibt
+ausdrücklich unzureichend und wird nicht verwendet.** Beim **neuen** Release wird zudem
+verifiziert, dass der Release-Tag im CRI-Store auflösbar ist **und** die laufende
+Pod-Digest exakt zu seiner CRI-Identität gehört (nicht nur das Spec-Image stimmt). **Keine**
+Löschung von DB/Queue, **kein** Purge; State zurück auf den letzten guten Schritt, Resume möglich.
 
 ## Monitoring-Reload
 Der Consumer erzeugt `consumer.json` atomar. Danach wird Prometheus **kontrolliert neu
