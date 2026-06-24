@@ -66,3 +66,6 @@ monitoring/prometheus/targets/*.json
 
 # Phase-3-Runtime-State (site-dc; vom kontrollierten Upgrade-Skript geschrieben)
 sites/dc/.phase3-runtime/
+
+# D3B2.1-Consumer-Rollout-State (site-cloud; vom Rollout-Controller geschrieben)
+sites/cloud/.d3b2-consumer/

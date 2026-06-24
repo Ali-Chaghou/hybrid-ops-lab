@@ -152,8 +152,10 @@ Repository umgesetzt, aber **noch nicht live deployed/verifiziert**.
 | Gate D1 | idempotente Consumer-Runtime (Inbox/Projection verdrahtet, Commit vor Queue-Delete, Transport-/Business-Duplikate erkannt, Konflikte/Fehler fail closed) | 🔧 im Repo gemerged · ⛔ nicht live deployed |
 | Gate D2 | Main Queue + DLQ, native Redrive-Policy (`maxReceiveCount = 5`), Poison-Message-Policy, Consumer-/Queue-/DLQ-Metriken & Alerts, reproduzierbarer Scrape-Pfad | 🔧 im Repo gemerged · ⛔ nicht live deployed |
 | Gate D3A | lease-basierter Outbox-Publisher-Kern (Claim/Fencing, einzelnes SendMessage, eigene Least-Privilege-Rolle, Migration `0004`, disabled by default) | 🔧 im Repo gemerged · ⛔ nicht live deployed |
-| Gate D3B1 | Publisher-Service-Wiring (Compose disabled), Secret-Isolation, Route-Config, Prometheus-Scrape + enabled-gated Alerts, kontrolliertes Upgrade-Skript + Fail-closed-Guards | 🔧 im aktuellen Branch implementiert · ⛔ nicht live deployed |
-| Gate D3B2 | kontrollierter Live-Rollout + bewusste Aktivierung + E2E-Nachweis | ⬜ ausstehend |
+| Gate D3B1 | Publisher-Service-Wiring (Compose disabled), Secret-Isolation, Route-Config, Prometheus-Scrape + enabled-gated Alerts, kontrolliertes Upgrade-Skript + Fail-closed-Guards | 🔧 im Repo gemerged · ⛔ nicht live deployed |
+| Gate D3B2.1 | site-cloud-isolierter Consumer-/D1-/D2-Rollout-Controller (Queue-Leerheitsgate, Restart-Ack, Build-vor-Migration, DB-Kette, Rollback, Monitoring-Reload) | 🔧 im aktuellen Branch implementiert · ⛔ nicht live durchgeführt |
+| Gate D3B2.2 | site-dc-Migration `0004` + disabled Publisher (getrennt) | ⬜ ausstehend |
+| Gate D3B2.3 | bewusste Publisher-Aktivierung + E2E-Nachweis | ⬜ ausstehend |
 | Phase 3 gesamt | Event-Versand aktiviert | ⛔ nicht aktiviert (`EVENTS_ENABLED=false`) |
 
 Details: [Idempotenz](docs/idempotency.md) (D1), [ADR-007](docs/decisions/007-dlq-and-redrive.md)
@@ -161,12 +163,16 @@ Details: [Idempotenz](docs/idempotency.md) (D1), [ADR-007](docs/decisions/007-dl
 [Phase-3-Runtime-Upgrade-Runbook](docs/runbook-phase-3-runtime-upgrade.md). Nichts davon
 ist produktiv, live oder vollständig ausgerollt.
 
-### Nächster Schritt — Gate D3B2 (kontrollierter Live-Rollout)
+### Nächster Schritt — Gate D3B2.1 (site-cloud Consumer-/D1-/D2-Rollout)
 
-Noch **nicht** ausgeführt (kein Live-Zugriff in diesem Stand): D1/D2 live deployen &
-verifizieren, Migration `0004` live (Variante B), Inventory aktualisieren, Publisher
-**disabled** deployen, Monitoring (Scrape + Alerts) prüfen, **bewusste** Aktivierung über
-ein separates Gate, End-to-End-Nachweis über den echten Outbox-Pfad, Disable-/Rollback-Test.
+Der site-cloud-isolierte Rollout-Controller (`ops/deploy/upgrade-consumer-runtime.sh`,
+`make cloud-up`) ist **implementiert, aber noch nicht live durchgeführt**. Er bringt
+D1/D2 kontrolliert live (Queue-Leerheitsgate, Restart-Acknowledgement, Image-Build vor
+Migration, deterministische DB-Kette, Consumer-Deploy mit Rollback, verifizierter
+Prometheus-Reload) — **ohne** site-dc, **ohne** Publisher, **ohne** Phase-3-Aktivierung.
+Details: [D3B2.1-Runbook](docs/runbook-d3b2-consumer-rollout.md). Danach folgen getrennt
+**D3B2.2** (site-dc-Migration `0004`, Variante B, disabled Publisher) und **D3B2.3**
+(bewusste Publisher-Aktivierung + E2E-Nachweis). Keine Live-Verifikation in diesem Stand.
 
 ## Schnellstart
 

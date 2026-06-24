@@ -63,7 +63,9 @@ spec:
             - "host.k3d.internal"
       containers:
         - name: consumer
-          image: inventory-consumer:dev
+          # Platzhalter: deploy-consumer.sh setzt den tatsaechlich gebauten Tag
+          # (immutable Release-Tag inventory-consumer:<12hex> in D3B2.1).
+          image: __CONSUMER_IMAGE__
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000

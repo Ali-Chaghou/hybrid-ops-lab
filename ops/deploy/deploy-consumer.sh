@@ -18,6 +18,13 @@ set -euo pipefail
 CLUSTER="${CLUSTER:-site-cloud}"
 NETWORK="${NETWORK:-k3d-${CLUSTER}}"
 IMAGE="${IMAGE:-inventory-consumer:dev}"
+# Injection-sichere Tag-Form (kein Shell-/sed-Metazeichen) — der Tag wird per sed in
+# das Manifest gerendert. Nur Repo:Tag aus [A-Za-z0-9._/-].
+case "${IMAGE}" in
+  *[!A-Za-z0-9._/:-]*) echo "[deploy-consumer] FEHLER: ungueltiger IMAGE-Tag." >&2; exit 1 ;;
+esac
+printf '%s' "${IMAGE}" | grep -Eq '^[A-Za-z0-9._/-]+:[A-Za-z0-9._-]+$' \
+  || { echo "[deploy-consumer] FEHLER: IMAGE muss die Form repo:tag haben." >&2; exit 1; }
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MANIFEST="${REPO_ROOT}/sites/cloud/k8s/consumer.yaml"
 ENV_FILE="${ENV_FILE:-${REPO_ROOT}/sites/cloud/.env}"
@@ -92,8 +99,9 @@ create_db_secret() {
 create_db_secret
 trap - EXIT
 
-# Manifest anwenden (nur die NICHT-geheime Gateway-IP wird per sed gesetzt).
-kubectl apply -f <(sed "s|__K3D_GATEWAY__|${GATEWAY}|g" "${MANIFEST}")
+# Manifest anwenden: NICHT-geheime Gateway-IP UND der tatsaechlich gebaute Image-Tag
+# werden per sed gesetzt (beide vorab validiert -> keine Injection).
+kubectl apply -f <(sed -e "s|__K3D_GATEWAY__|${GATEWAY}|g" -e "s|__CONSUMER_IMAGE__|${IMAGE}|g" "${MANIFEST}")
 
 # Rollout neu anstossen, damit der Pod eine ggf. rotierte DATABASE_URL uebernimmt
 # (envFrom-Secret-Aenderungen starten Pods nicht automatisch neu).
