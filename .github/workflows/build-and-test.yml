@@ -162,3 +162,29 @@ jobs:
             echo "FAIL metrics: inventory_movements_created_total missing"
             exit 1
           fi
+
+  publisher-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install PostgreSQL server binaries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-16
+      - name: Install publisher runtime + dev deps
+        run: |
+          python -m pip install -q --upgrade pip
+          python -m pip install -q -r apps/publisher/requirements.txt
+          python -m pip install -q -r apps/publisher/requirements-dev.txt
+      - name: pip check
+        run: python -m pip check
+      - name: compileall (publisher + shared ops)
+        run: python -m compileall -q apps/publisher/app ops/db
+      - name: Publisher test suite (claim/lease/fencing + fake SQS, real PostgreSQL)
+        working-directory: apps/publisher
+        env:
+          PG_BINDIR: /usr/lib/postgresql/16/bin
+        run: python -m pytest -p no:cacheprovider

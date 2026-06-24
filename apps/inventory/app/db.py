@@ -27,6 +27,7 @@ KNOWN_MIGRATIONS = (
     "0001_create_stock_movements",
     "0002_add_stable_event_id",
     "0003_create_event_outbox",
+    "0004_add_outbox_claim_fields",
 )
 
 # Interne Test-Seam (NUR fuer Integrationstests): ein optionaler Fault-Hook, der an

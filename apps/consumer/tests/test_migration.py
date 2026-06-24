@@ -93,6 +93,7 @@ def test_inventory_clean_install(db_factory):
         "0001_create_stock_movements",
         "0002_add_stable_event_id",
         "0003_create_event_outbox",
+        "0004_add_outbox_claim_fields",
     ]
     with psycopg.connect(admin) as c:
         tabs = {r[0] for r in c.execute(
@@ -126,7 +127,7 @@ def test_inventory_second_migration_run_is_noop(db_factory):
     assert again == []
     with psycopg.connect(admin) as c:
         n = c.execute("SELECT count(*) FROM schema_migrations").fetchone()[0]
-        assert n == 3
+        assert n == 4
 
 
 def test_failed_migration_not_marked_applied(db_factory, tmp_path):
