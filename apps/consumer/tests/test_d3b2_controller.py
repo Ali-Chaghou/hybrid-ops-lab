@@ -30,7 +30,13 @@ echo "docker $*" >> "$CMDLOG"
 if [ "$1" = "exec" ]; then
   shift 2  # 'exec <node>' verwerfen
   case "$*" in
-    *"crictl inspecti"*)
+    "test -x "*crictl) [ "${FAKE_NO_CRICTL:-0}" = "1" ] && exit 1; exit 0 ;;
+    "test -x "*ctr)    [ "${FAKE_NO_CTR:-0}" = "1" ] && exit 1; exit 0 ;;
+    *"inspecti --help"*) [ "${FAKE_CRICTL_PROBE_FAIL:-0}" = "1" ] && exit 1; exit 0 ;;
+    *"images ls -q"*) [ "${FAKE_CTR_LS_FAIL:-0}" = "1" ] && exit 1; echo "x"; exit 0 ;;
+    *"images tag") [ "${FAKE_NO_TAG_SUBCMD:-0}" = "1" ] && exit 1; exit 0 ;;   # Subkommando-Probe (No-op)
+    *"images tag "*) touch "${CTR_TAG_MARKER}"; exit "${FAKE_CTR_RC:-0}" ;;     # echtes Tagging (mit Refs)
+    *"inspecti -o json"*)
       ref="${@: -1}"
       case "$ref" in
         *:rollback-*)
@@ -44,7 +50,6 @@ if [ "$1" = "exec" ]; then
           printf '{"status":{"id":"%s","repoTags":["%s"],"repoDigests":["%s"]}}\n' \
             "${FAKE_CRI_ID:-REPLACE_RID}" "${FAKE_CRI_REPOTAG:-docker.io/library/inventory-consumer:dev}" "${FAKE_CRI_REPODIGEST:-}"; exit 0 ;;
       esac ;;
-    *"ctr -n k8s.io images tag"*) touch "${CTR_TAG_MARKER}"; exit "${FAKE_CTR_RC:-0}" ;;
   esac
   exit 0
 fi
@@ -185,6 +190,42 @@ def test_legacy_secured_before_build_and_deploy(tmp_path):
     assert _i(log, "ctr -n k8s.io images tag") < _i(log, "deploy-consumer")
 
 
+# --- Runtime-Tool-Erkennung (plain crictl/ctr, kein k3s) -------------------
+
+def test_uses_plain_crictl_ctr_not_k3s_wrappers(tmp_path):
+    env, cmdlog, _ = _setup(tmp_path)
+    assert _run(env, "run").returncode == 0
+    log = cmdlog.read_text()
+    assert "/bin/crictl inspecti -o json" in log
+    assert "/bin/ctr -n k8s.io images tag" in log
+    assert "k3s crictl" not in log and "k3s ctr" not in log
+    # k8s.io-Namespace explizit; Detection-Probes vorhanden.
+    assert "test -x /bin/crictl" in log and "test -x /bin/ctr" in log
+    assert "/bin/ctr -n k8s.io images ls -q" in log
+
+
+@pytest.mark.parametrize("flag", ["FAKE_NO_CRICTL", "FAKE_NO_CTR", "FAKE_CRICTL_PROBE_FAIL",
+                                  "FAKE_CTR_LS_FAIL", "FAKE_NO_TAG_SUBCMD"])
+def test_tool_gate_fails_closed(tmp_path, flag):
+    env, cmdlog, state_dir = _setup(tmp_path, **{flag: "1"})
+    res = _run(env, "run")
+    assert res.returncode != 0
+    log = cmdlog.read_text()
+    # Gate VOR jeder Mutation: kein Build, keine Queue-Neuerstellung, keine Migration,
+    # kein Deploy, KEIN State geschrieben.
+    assert "build consumer-db-bootstrap" not in log
+    assert "force-recreate --no-deps sqs" not in log
+    assert "run --rm --no-deps consumer-migrate" not in log
+    assert "deploy-consumer" not in log
+    assert not (state_dir / "state.json").exists()
+
+
+def test_tool_gate_runs_in_preflight_before_state(tmp_path):
+    env, _, state_dir = _setup(tmp_path, FAKE_NO_CRICTL="1")
+    assert _run(env, "preflight").returncode != 0
+    assert not (state_dir / "state.json").exists()
+
+
 def test_no_queue_mutation_no_sitedc_no_secret_leak(tmp_path):
     env, cmdlog, _ = _setup(tmp_path)
     assert _run(env, "run").returncode == 0
@@ -212,10 +253,10 @@ def test_capture_aborts_on_cri_digest_mismatch(tmp_path):
 
 
 def test_existing_rollback_tag_same_identity_reused(tmp_path):
-    env, cmdlog, _ = _setup(tmp_path, FAKE_RB_PREEXISTS="1", FAKE_RB_ID=_RID)
+    env, _, _ = _setup(tmp_path, FAKE_RB_PREEXISTS="1", FAKE_RB_ID=_RID)
     assert _run(env, "run").returncode == 0
-    log = cmdlog.read_text()
-    assert "ctr -n k8s.io images tag" not in log   # vorhandener Tag wiederverwendet
+    # Kein ECHTES Tagging (Marker bleibt aus); der Detection-No-op zaehlt nicht.
+    assert not pathlib.Path(env["CTR_TAG_MARKER"]).exists()
 
 
 def test_existing_rollback_tag_divergent_identity_aborts(tmp_path):
@@ -300,7 +341,9 @@ def test_run_on_complete_state_no_mutation(tmp_path):
     env, cmdlog, state_dir = _setup(tmp_path)
     _seed_state(state_dir, "complete", complete=True)
     assert _run(env, "run").returncode == 0
-    assert "ctr -n k8s.io images tag" not in cmdlog.read_text()
+    log = cmdlog.read_text()
+    assert "build consumer-db-bootstrap" not in log and "force-recreate" not in log
+    assert not pathlib.Path(env["CTR_TAG_MARKER"]).exists()   # kein echtes Tagging
 
 
 def test_resume_without_state_aborts(tmp_path):
