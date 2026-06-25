@@ -129,6 +129,9 @@ fi
 TMP_TARGET="$(mktemp "${TARGET_DIR}/.consumer.json.XXXXXX")"
 printf '[\n  { "targets": ["host.docker.internal:%s"], "labels": { "site": "cloud", "app": "inventory-consumer" } }\n]\n' \
   "${METRICS_NODEPORT}" > "${TMP_TARGET}"
+# mktemp erzeugt 0600; Prometheus laeuft als anderer Container-User und muss die
+# bind-gemountete Datei lesen koennen -> Modus VOR dem atomaren mv explizit auf 0644.
+chmod 0644 "${TMP_TARGET}" || { echo "[deploy-consumer] FEHLER: Dateimodus 0644 fuer das Target nicht setzbar." >&2; rm -f "${TMP_TARGET}"; exit 1; }
 mv -f "${TMP_TARGET}" "${TARGET_DIR}/consumer.json"
 echo "[deploy-consumer] Prometheus-Target geschrieben: ${TARGET_DIR}/consumer.json"
 echo "[deploy-consumer] Consumer deployed (host.k3d.internal -> ${GATEWAY}; /metrics -> host.docker.internal:${METRICS_NODEPORT})."

@@ -45,6 +45,10 @@ TMP="$(mktemp "${TARGET_DIR}/.publisher.json.XXXXXX")"
 trap 'rm -f "${TMP}"' EXIT
 printf '[\n  { "targets": ["%s:%s"], "labels": { "site": "dc", "app": "outbox-publisher" } }\n]\n' \
   "${HOST}" "${PORT}" > "${TMP}"
+# mktemp erzeugt 0600; Prometheus (anderer Container-User) muss die bind-gemountete
+# Datei lesen koennen -> Modus VOR dem atomaren mv explizit auf 0644. Bei Fehler
+# fail closed (Cleanup-Trap entfernt die Tempdatei).
+chmod 0644 "${TMP}" || { echo "[render-publisher-target] FEHLER: Dateimodus 0644 nicht setzbar." >&2; exit 1; }
 mv -f "${TMP}" "${TARGET_FILE}"
 trap - EXIT
 
