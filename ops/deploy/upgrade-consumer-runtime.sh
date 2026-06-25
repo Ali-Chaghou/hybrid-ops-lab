@@ -33,6 +33,11 @@ QUEUE_ENDPOINT="${QUEUE_ENDPOINT:-http://localhost:9324}"
 PROM_ENDPOINT="${PROM_ENDPOINT:-http://localhost:9090}"
 # Read-only Queue-Leerheitsgate (ueberschreibbar fuer Tests).
 QUEUE_GATE_CMD="${QUEUE_GATE_CMD:-python3 ${REPO_ROOT}/ops/deploy/check-queue-empty.py ${QUEUE_ENDPOINT}}"
+# Beschraenkte, read-only Queue-Readiness-Wartung: ElasticMQ braucht nach 'running'
+# einige Sekunden, bis REST-API + deklarative Queues bereit sind. Defaults 30x1s;
+# fuer Tests ueberschreibbar (Werte werden vor Verwendung validiert).
+QUEUE_READY_ATTEMPTS="${D3B2_QUEUE_READY_ATTEMPTS:-30}"
+QUEUE_READY_INTERVAL="${D3B2_QUEUE_READY_INTERVAL:-1}"
 # Bewusstes Operator-Acknowledgement fuer bestehende Consumer-Restarts (kein Secret).
 ACK_RESTARTS="${D3B2_ACK_CONSUMER_RESTARTS:-0}"
 # Release-Bindung: 40-hex Commit vom Orchestrierungs-Desktop (kein Remote-.git).
@@ -255,14 +260,31 @@ phase_images_built() {
   write_state images-built false
 }
 
+# Beschraenkte, read-only Wartung bis ElasticMQ bereit ist: ruft NUR das vorhandene
+# _verify_queue() (ListQueues/GetQueueAttributes + Leerheitsgate) auf — keine
+# Mutation (kein create/purge/send/receive/redrive). Fail closed nach Timeout.
+_wait_queue_ready() {
+  local n="${QUEUE_READY_ATTEMPTS}" iv="${QUEUE_READY_INTERVAL}" i
+  printf '%s' "${n}"  | grep -Eq '^[1-9][0-9]*$' || fail "ungueltiges QUEUE_READY_ATTEMPTS (positive Ganzzahl erwartet)."
+  printf '%s' "${iv}" | grep -Eq '^[0-9]+$'      || fail "ungueltiges QUEUE_READY_INTERVAL (Ganzzahl >= 0 erwartet)."
+  for i in $(seq 1 "${n}"); do
+    if _verify_queue; then
+      log "ElasticMQ bereit (Versuch ${i}/${n}): Main+DLQ vorhanden, Redrive ok, Tiefen 0."
+      return 0
+    fi
+    [ "${i}" -lt "${n}" ] && sleep "${iv}"
+  done
+  fail "ElasticMQ wurde nach ${n} Versuchen nicht bereit (read-only Queue-/DLQ-/Redrive-Verifikation) — fail closed."
+}
+
 phase_queue_config_ready() {
   log "QUEUE-GATE: Read-only Leerheitspruefung (ListQueues/GetQueueAttributes)"
   ${QUEUE_GATE_CMD} || fail "Queue-Leerheitsgate fehlgeschlagen — keine ElasticMQ-Neuerstellung (fail closed)."
-  log "QUEUE: nur den sqs-Service kontrolliert neu erstellen (kein pauschales down)"
+  log "QUEUE: nur den sqs-Service GENAU EINMAL kontrolliert neu erstellen (kein pauschales down)"
   dc up -d --force-recreate --no-deps sqs || fail "sqs-Neuerstellung fehlgeschlagen"
-  _wait_health sqs || log "Hinweis: sqs-Health n/a (kein Healthcheck) — Erreichbarkeit folgt"
-  log "VERIFY: Main+DLQ vorhanden, Redrive maxReceiveCount=5, Tiefen 0, Toxiproxy-Pfad"
-  _verify_queue || fail "Queue-/DLQ-/Redrive-Verifikation fehlgeschlagen"
+  _wait_health sqs || log "Hinweis: sqs-Health n/a (kein Healthcheck) — Readiness folgt read-only."
+  log "VERIFY: warte beschraenkt+read-only auf Main+DLQ, Redrive maxReceiveCount=5, Tiefen 0, Toxiproxy-Pfad"
+  _wait_queue_ready
   write_state queue-config-ready false
 }
 

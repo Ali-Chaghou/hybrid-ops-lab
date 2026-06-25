@@ -90,7 +90,16 @@ _FAKE_CURL = r"""#!/usr/bin/env bash
 echo "curl $*" >> "$CMDLOG"
 for a in "$@"; do url="$a"; done
 case "$url" in
-  *Action=ListQueues*) echo '<r><QueueUrl>http://h/000000000000/inventory-movements</QueueUrl><QueueUrl>http://h/000000000000/inventory-movements-dlq</QueueUrl></r>'; exit 0 ;;
+  *Action=ListQueues*)
+    # Readiness-Simulation: die DLQ erscheint erst ab dem FAKE_QUEUE_READY_AFTER-ten
+    # ListQueues-Aufruf -> _verify_queue schlaegt vorher fehl (DLQ fehlt).
+    c=$(cat "${FAKE_LQ_COUNTER}" 2>/dev/null || echo 0); c=$((c+1)); echo "$c" > "${FAKE_LQ_COUNTER}"
+    if [ "$c" -ge "${FAKE_QUEUE_READY_AFTER:-1}" ]; then
+      echo '<r><QueueUrl>http://h/000000000000/inventory-movements</QueueUrl><QueueUrl>http://h/000000000000/inventory-movements-dlq</QueueUrl></r>'
+    else
+      echo '<r><QueueUrl>http://h/000000000000/inventory-movements</QueueUrl></r>'
+    fi
+    exit 0 ;;
   *Action=GetQueueAttributes*) echo '<r><Attribute><Name>RedrivePolicy</Name><Value>{"maxReceiveCount":"5"}</Value></Attribute></r>'; exit 0 ;;
   *api/v1/targets*) if [ "${PROM_FAIL:-0}" = "1" ]; then echo '{"data":{"activeTargets":[]}}'; else echo '{"data":{"activeTargets":[{"labels":{"job":"consumer"},"health":"up"}]}}'; fi; exit 0 ;;
   *api/v1/rules*) echo '{"data":{"groups":[{"name":"consumer"},{"name":"queue"}]}}'; exit 0 ;;
@@ -130,6 +139,7 @@ def _setup(tmp_path, **over):
         "DEPLOY_MARKER": str(tmp_path / "deployed.marker"),
         "CTR_TAG_MARKER": str(tmp_path / "ctr_tag.marker"),
         "D3B2_K3D_NODE": "k3d-site-cloud-server-0",
+        "FAKE_LQ_COUNTER": str(tmp_path / "lq.cnt"),  # ListQueues-Aufrufzaehler (Readiness-Sim)
     })
     env.update(over)
     return env, cmdlog, (tmp_path / "state")
@@ -406,6 +416,53 @@ def test_run_on_complete_state_no_mutation(tmp_path):
 def test_resume_without_state_aborts(tmp_path):
     env, _, _ = _setup(tmp_path)
     assert _run(env, "resume").returncode != 0
+
+
+def test_queue_ready_succeeds_on_later_retry(tmp_path):
+    # ElasticMQ ist erst ab dem 3. ListQueues-Aufruf bereit (DLQ erscheint spaeter).
+    env, cmdlog, state_dir = _setup(tmp_path, FAKE_QUEUE_READY_AFTER="3",
+                                    D3B2_QUEUE_READY_ATTEMPTS="10", D3B2_QUEUE_READY_INTERVAL="0")
+    res = _run(env, "run")
+    assert res.returncode == 0, res.stderr
+    log = cmdlog.read_text()
+    # sqs-Neuerstellung GENAU EINMAL (ausserhalb der Retry-Schleife).
+    assert log.count("up -d --force-recreate --no-deps sqs") == 1
+    assert json.loads((state_dir / "state.json").read_text())["step"] == "complete"
+
+
+def test_queue_readiness_timeout_fails_closed_at_images_built(tmp_path):
+    # DLQ erscheint nie -> Readiness-Timeout -> fail closed.
+    env, cmdlog, state_dir = _setup(tmp_path, FAKE_QUEUE_READY_AFTER="9999",
+                                    D3B2_QUEUE_READY_ATTEMPTS="3", D3B2_QUEUE_READY_INTERVAL="0")
+    res = _run(env, "run")
+    assert res.returncode != 0
+    log = cmdlog.read_text()
+    # sqs nur einmal neu erstellt; danach nur read-only Retries.
+    assert log.count("up -d --force-recreate --no-deps sqs") == 1
+    # Keine DB-Setup-/Migrations-/Deploy-Phase betreten (Image-Build in 'images-built'
+    # davor ist erlaubt; gemeint ist die DB-Kette ab consumer-db-ready).
+    assert "run --rm --no-deps consumer-db-bootstrap" not in log
+    assert "run --rm --no-deps consumer-migrate" not in log
+    assert "deploy-consumer" not in log
+    # State bleibt bei images-built (queue-config-ready NICHT geschrieben).
+    assert json.loads((state_dir / "state.json").read_text())["step"] == "images-built"
+
+
+def test_queue_readiness_retries_are_read_only(tmp_path):
+    env, cmdlog, _ = _setup(tmp_path, FAKE_QUEUE_READY_AFTER="9999",
+                            D3B2_QUEUE_READY_ATTEMPTS="3", D3B2_QUEUE_READY_INTERVAL="0")
+    assert _run(env, "run").returncode != 0
+    log = cmdlog.read_text()
+    for bad in ("SendMessage", "DeleteMessage", "PurgeQueue", "ReceiveMessage", "redrive"):
+        assert bad not in log
+
+
+def test_queue_ready_immediate_success_still_works(tmp_path):
+    # Default FAKE_QUEUE_READY_AFTER=1 -> sofortiger Erfolg, kein sleep noetig.
+    env, cmdlog, state_dir = _setup(tmp_path)
+    assert _run(env, "run").returncode == 0
+    assert json.loads((state_dir / "state.json").read_text())["step"] == "complete"
+    assert cmdlog.read_text().count("up -d --force-recreate --no-deps sqs") == 1
 
 
 def test_queue_gate_failure_aborts_before_recreate(tmp_path):
