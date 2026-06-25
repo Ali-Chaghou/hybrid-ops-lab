@@ -45,6 +45,10 @@ CONSUMER_DB_NAME="${CONSUMER_DB:-consumer}"
 # k3d-Server-Node = Quelle der Wahrheit fuer laufende Pod-Images (containerd/CRI).
 # Ueberschreibbar fuer Tests, aber Name wird gegen ein enges Muster validiert.
 K3D_NODE="${D3B2_K3D_NODE:-k3d-site-cloud-server-0}"
+# NodePort-Publikation: k3d veroeffentlicht den Host-Port NICHT auf dem Server-Node,
+# sondern auf dem generierten Server-Loadbalancer. Nur fuer den Publikations-Check
+# (NICHT fuer CRI/containerd) genutzt. Getrennte, validierte Variable; kein Fallback.
+K3D_PORT_OWNER="${D3B2_K3D_PORT_OWNER:-k3d-site-cloud-serverlb}"
 CRI_ID_HELPER="${REPO_ROOT}/ops/deploy/cri-image-identity.py"
 # Der k3d-Node nutzt die EIGENSTAENDIGEN Binaries crictl/ctr (NICHT 'k3s crictl' /
 # 'k3s ctr' — die liefern im k3d-Node keine verwertbare Ausgabe). Feste, im Code
@@ -222,9 +226,14 @@ preflight() {
   k3d cluster list 2>/dev/null | grep -q . || fail "kein k3d-Cluster gefunden"
   # Runtime-Tool-Gate VOR State-Schreiben/Mutation: crictl/ctr im k3d-Node funktionsfaehig.
   detect_runtime_tools
-  # NodePort 30090 auf Host veroeffentlicht (sonst kein Consumer-Scrape).
-  docker port "k3d-site-cloud-server-0" "30090/tcp" >/dev/null 2>&1 \
-    || fail "Consumer-NodePort 30090 nicht auf den Host veroeffentlicht (create-site-cloud-cluster.sh)"
+  # NodePort 30090 auf Host veroeffentlicht — k3d publiziert ihn ueber den generierten
+  # Server-Loadbalancer (K3D_PORT_OWNER), NICHT ueber den Server-Node. Kein Fallback.
+  printf '%s' "${K3D_PORT_OWNER}" | grep -Eq '^[A-Za-z0-9._-]+$' \
+    || fail "ungueltiger Port-Owner-Containername."
+  docker inspect "${K3D_PORT_OWNER}" >/dev/null 2>&1 \
+    || fail "Port-Owner-Container ${K3D_PORT_OWNER} nicht gefunden/erreichbar."
+  docker port "${K3D_PORT_OWNER}" "30090/tcp" >/dev/null 2>&1 \
+    || fail "Consumer-NodePort 30090 nicht auf den Host veroeffentlicht (erwartet auf ${K3D_PORT_OWNER}; create-site-cloud-cluster.sh)"
   # Toxiproxy/ElasticMQ grundsaetzlich erreichbar (read-only ListQueues, keine URL-Logs).
   curl -s --max-time 6 "${QUEUE_ENDPOINT}/?Action=ListQueues&Version=2012-11-05" >/dev/null 2>&1 \
     || fail "ElasticMQ nicht erreichbar"
@@ -279,7 +288,7 @@ phase_consumer_deployed() {
   log "ROLLBACK-ZIEL deterministisch erfassen (Revision, altes Image beweisbar verfuegbar, Rollback-Tag) VOR dem Deploy"
   _capture_rollback_target
   log "DEPLOY: immutable Runtime-Tag ${RUNTIME_TAG} (deploy-consumer.sh rendert ihn ins Manifest)"
-  if ! IMAGE="${RUNTIME_TAG}" ${DEPLOY_CONSUMER_CMD}; then
+  if ! IMAGE="${RUNTIME_TAG}" K3D_PORT_OWNER="${K3D_PORT_OWNER}" ${DEPLOY_CONSUMER_CMD}; then
     log "ROLLOUT-FEHLER: kontrollierter Rollback auf gespeicherten immutable Rollback-Tag (DB/Queue bleiben)"
     _rollback_consumer || log "Rollback NICHT beweisbar erfolgreich — manuelle Pruefung noetig."
     write_state consumer-schema-ready false   # zurueck auf letzten guten Schritt

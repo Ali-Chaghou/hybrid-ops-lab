@@ -29,7 +29,12 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MANIFEST="${REPO_ROOT}/sites/cloud/k8s/consumer.yaml"
 ENV_FILE="${ENV_FILE:-${REPO_ROOT}/sites/cloud/.env}"
 METRICS_NODEPORT="${METRICS_NODEPORT:-30090}"
-SERVER_NODE="k3d-${CLUSTER}-server-0"
+# k3d veroeffentlicht den Host-Port auf dem generierten Server-Loadbalancer-Container
+# (k3d-<cluster>-serverlb), NICHT auf dem Server-Node -> Publikations-Check prueft den
+# Loadbalancer (PORT_OWNER). Validierter, eng begrenzter Containername.
+PORT_OWNER="${K3D_PORT_OWNER:-k3d-${CLUSTER}-serverlb}"
+printf '%s' "${PORT_OWNER}" | grep -Eq '^[A-Za-z0-9._-]+$' \
+  || { echo "[deploy-consumer] FEHLER: ungueltiger Port-Owner-Containername." >&2; exit 1; }
 # Verzeichnis der Prometheus-file-sd-Targets (im monitoring-Compose read-only nach
 # /etc/prometheus/targets gemountet). Ueberschreibbar fuer Tests.
 TARGET_DIR="${TARGET_DIR:-${REPO_ROOT}/monitoring/prometheus/targets}"
@@ -51,16 +56,21 @@ if [ -z "${GATEWAY}" ]; then
 fi
 echo "[deploy-consumer] k3d-Gateway: ${GATEWAY}"
 
-# Fail closed: der Consumer-/metrics-NodePort MUSS vom k3d-Server-Node auf den Host
-# veroeffentlicht sein, sonst kann Prometheus host.docker.internal:${METRICS_NODEPORT}
-# nicht scrapen und es entstuende keine up{job="consumer"}-Serie. Ohne gueltigen
-# Scrape-Pfad wird NICHT weiter deployt.
-if ! docker port "${SERVER_NODE}" "${METRICS_NODEPORT}/tcp" >/dev/null 2>&1; then
-  echo "[deploy-consumer] FEHLER: NodePort ${METRICS_NODEPORT} ist nicht auf den Host veroeffentlicht." >&2
+# Fail closed: der Consumer-/metrics-NodePort MUSS auf den Host veroeffentlicht sein,
+# sonst kann Prometheus host.docker.internal:${METRICS_NODEPORT} nicht scrapen und es
+# entstuende keine up{job="consumer"}-Serie. k3d publiziert den Host-Port ueber den
+# generierten Server-Loadbalancer (PORT_OWNER), NICHT ueber den Server-Node. Kein
+# stiller Fallback zwischen Loadbalancer und Server-Node.
+if ! docker inspect "${PORT_OWNER}" >/dev/null 2>&1; then
+  echo "[deploy-consumer] FEHLER: Port-Owner-Container '${PORT_OWNER}' nicht gefunden/erreichbar." >&2
+  exit 1
+fi
+if ! docker port "${PORT_OWNER}" "${METRICS_NODEPORT}/tcp" >/dev/null 2>&1; then
+  echo "[deploy-consumer] FEHLER: NodePort ${METRICS_NODEPORT} ist nicht auf den Host veroeffentlicht (erwartet auf ${PORT_OWNER})." >&2
   echo "[deploy-consumer] Cluster mit Portabbildung erstellen: ops/bootstrap/create-site-cloud-cluster.sh" >&2
   exit 1
 fi
-echo "[deploy-consumer] NodePort ${METRICS_NODEPORT} auf Host veroeffentlicht — ok."
+echo "[deploy-consumer] NodePort ${METRICS_NODEPORT} auf Host veroeffentlicht (via ${PORT_OWNER}) — ok."
 
 # Image bauen + importieren — BEVOR irgendwelche Secrets geladen werden, damit waehrend
 # des Builds nichts Geheimes in der Umgebung steht. Kontext = Repo-Root (ops/ + Migrationen).
