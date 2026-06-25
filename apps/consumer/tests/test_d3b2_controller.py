@@ -55,7 +55,7 @@ if [ "$1" = "exec" ]; then
 fi
 if [ "$1" = "image" ] && [ "$2" = "inspect" ]; then echo "sha256:5e7000000000000000000000000000000000000000000000000000000000face"; exit 0; fi
 [ "$1" = "inspect" ] && { echo "healthy"; exit 0; }
-[ "$1" = "port" ] && exit 0
+[ "$1" = "port" ] && { [ "${FAKE_NO_PORT:-0}" = "1" ] && exit 1; echo "0.0.0.0:30090"; exit 0; }
 if [ "$1" = "compose" ]; then
   case "$*" in
     *" ps "*-q*) echo "cid-fake"; exit 0 ;;
@@ -99,7 +99,7 @@ echo '{}'; exit 0
 """
 
 _FAKE_DEPLOY = r"""#!/usr/bin/env bash
-echo "deploy-consumer IMAGE=$IMAGE $*" >> "$CMDLOG"
+echo "deploy-consumer IMAGE=$IMAGE K3D_PORT_OWNER=$K3D_PORT_OWNER $*" >> "$CMDLOG"
 printf '[]' > "$D3B2_TARGET_DIR/consumer.json"
 touch "$DEPLOY_MARKER"
 exit ${FAKE_DEPLOY_RC:-0}
@@ -240,6 +240,47 @@ def test_tool_gate_runs_in_preflight_before_state(tmp_path):
     env, _, state_dir = _setup(tmp_path, FAKE_NO_CRICTL="1")
     assert _run(env, "preflight").returncode != 0
     assert not (state_dir / "state.json").exists()
+
+
+# --- NodePort-Publikation: Loadbalancer (serverlb), nicht Server-Node --------
+
+def test_nodeport_check_uses_serverlb_not_server_node(tmp_path):
+    env, cmdlog, _ = _setup(tmp_path)
+    assert _run(env, "run").returncode == 0
+    log = cmdlog.read_text()
+    assert "docker port k3d-site-cloud-serverlb 30090/tcp" in log
+    assert "docker port k3d-site-cloud-server-0" not in log   # NICHT der Server-Node
+    # CRI/containerd laufen weiterhin auf dem Server-Node, NICHT auf dem Loadbalancer.
+    assert "docker exec k3d-site-cloud-server-0 /bin/crictl" in log
+    assert "exec k3d-site-cloud-serverlb" not in log
+
+
+def test_nodeport_missing_on_lb_fails_closed(tmp_path):
+    env, cmdlog, state_dir = _setup(tmp_path, FAKE_NO_PORT="1")
+    res = _run(env, "run")
+    assert res.returncode != 0
+    log = cmdlog.read_text()
+    assert "build consumer-db-bootstrap" not in log and "deploy-consumer" not in log
+    assert not (state_dir / "state.json").exists()
+
+
+def test_invalid_port_owner_rejected(tmp_path):
+    env, _, state_dir = _setup(tmp_path, D3B2_K3D_PORT_OWNER="bad name!")
+    assert _run(env, "run").returncode != 0
+    assert not (state_dir / "state.json").exists()
+
+
+def test_custom_port_owner_used_in_check_and_forwarded_to_deploy(tmp_path):
+    env, cmdlog, _ = _setup(tmp_path, D3B2_K3D_PORT_OWNER="k3d-custom-serverlb")
+    assert _run(env, "run").returncode == 0
+    log = cmdlog.read_text()
+    # Preflight-Publikations-Check nutzt den custom Port-Owner.
+    assert "docker port k3d-custom-serverlb 30090/tcp" in log
+    # An den Deploy-Befehl als K3D_PORT_OWNER weitergereicht.
+    assert "deploy-consumer IMAGE=" in log and "K3D_PORT_OWNER=k3d-custom-serverlb" in log
+    # NICHT fuer CRI/containerd; CRI nutzt weiterhin den Server-Node.
+    assert "exec k3d-custom-serverlb" not in log
+    assert "docker exec k3d-site-cloud-server-0 /bin/crictl" in log
 
 
 def test_no_queue_mutation_no_sitedc_no_secret_leak(tmp_path):

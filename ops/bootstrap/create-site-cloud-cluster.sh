@@ -14,15 +14,24 @@ set -euo pipefail
 
 CLUSTER="${CLUSTER:-site-cloud}"
 METRICS_NODEPORT="${METRICS_NODEPORT:-30090}"
-SERVER_NODE="k3d-${CLUSTER}-server-0"
+# WICHTIG: k3d veroeffentlicht den Host-Port NICHT auf dem Server-Node, sondern auf
+# dem generierten Server-Loadbalancer-Container (k3d-<cluster>-serverlb). Der
+# Publikations-Check prueft daher den Loadbalancer (PORT_OWNER), nicht den Server-Node.
+PORT_OWNER="${K3D_PORT_OWNER:-k3d-${CLUSTER}-serverlb}"
+printf '%s' "${PORT_OWNER}" | grep -Eq '^[A-Za-z0-9._-]+$' \
+  || { echo "[create-cluster] FEHLER: ungueltiger Port-Owner-Containername." >&2; exit 1; }
 
 if k3d cluster list "${CLUSTER}" >/dev/null 2>&1; then
   echo "[create-cluster] Cluster '${CLUSTER}' existiert bereits."
-  if docker port "${SERVER_NODE}" "${METRICS_NODEPORT}/tcp" >/dev/null 2>&1; then
-    echo "[create-cluster] Port ${METRICS_NODEPORT} ist bereits auf den Host veroeffentlicht — ok."
+  if ! docker inspect "${PORT_OWNER}" >/dev/null 2>&1; then
+    echo "[create-cluster] FEHLER: Port-Owner-Container '${PORT_OWNER}' nicht gefunden/erreichbar." >&2
+    exit 1
+  fi
+  if docker port "${PORT_OWNER}" "${METRICS_NODEPORT}/tcp" >/dev/null 2>&1; then
+    echo "[create-cluster] Port ${METRICS_NODEPORT} ist bereits auf den Host veroeffentlicht (via ${PORT_OWNER}) — ok."
     exit 0
   fi
-  echo "[create-cluster] FEHLER: Port ${METRICS_NODEPORT} ist NICHT veroeffentlicht." >&2
+  echo "[create-cluster] FEHLER: Port ${METRICS_NODEPORT} ist NICHT veroeffentlicht (erwartet auf ${PORT_OWNER})." >&2
   echo "[create-cluster] Eine k3d-Portabbildung kann nicht nachtraeglich ergaenzt werden." >&2
   echo "[create-cluster] Cluster bewusst neu erstellen (verwirft den Cluster-Zustand):" >&2
   echo "[create-cluster]   k3d cluster delete ${CLUSTER} && CLUSTER=${CLUSTER} $0" >&2
