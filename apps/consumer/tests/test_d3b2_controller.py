@@ -68,6 +68,13 @@ exit 0
 _FAKE_KUBECTL = r"""#!/usr/bin/env bash
 echo "kubectl $*" >> "$CMDLOG"
 case "$*" in
+  *"get pod"*"-o json"*)
+    # Ein-Pod-Liste fuer select-consumer-pod.py: Running/Ready, nicht terminierend.
+    # Pre-Deploy Image inventory-consumer:dev, post-Deploy (Marker) der Release-Tag.
+    if [ -f "${DEPLOY_MARKER:-/nonexistent}" ]; then img="${FAKE_RUNTIME_TAG}"; else img="${FAKE_CAPTURE_POD_IMAGE:-inventory-consumer:dev}"; fi
+    if [ -f "${DEPLOY_MARKER:-/nonexistent}" ] && [ -n "${FAKE_POD_IMAGE_ID_AFTER:-}" ]; then iid="${FAKE_POD_IMAGE_ID_AFTER}"; else iid="${FAKE_POD_IMAGE_ID:-REPLACE_RID}"; fi
+    printf '{"items":[{"metadata":{"name":"inventory-consumer-x","deletionTimestamp":null,"creationTimestamp":"2026-01-01T00:00:00Z"},"spec":{"containers":[{"name":"consumer","image":"%s"}]},"status":{"phase":"Running","startTime":"2026-01-01T00:00:00Z","containerStatuses":[{"name":"consumer","ready":true,"imageID":"%s","restartCount":%s}]}}]}\n' "$img" "$iid" "${FAKE_RESTARTS:-0}"
+    exit 0 ;;
   *restartCount*) echo "${FAKE_RESTARTS:-0}"; exit 0 ;;
   *imageID*) if [ -f "${DEPLOY_MARKER:-/nonexistent}" ] && [ -n "${FAKE_POD_IMAGE_ID_AFTER:-}" ]; then echo "${FAKE_POD_IMAGE_ID_AFTER}"; else echo "${FAKE_POD_IMAGE_ID:-REPLACE_RID}"; fi; exit 0 ;;
   *"annotations.deployment"*) echo "3"; exit 0 ;;
@@ -140,6 +147,8 @@ def _setup(tmp_path, **over):
         "CTR_TAG_MARKER": str(tmp_path / "ctr_tag.marker"),
         "D3B2_K3D_NODE": "k3d-site-cloud-server-0",
         "FAKE_LQ_COUNTER": str(tmp_path / "lq.cnt"),  # ListQueues-Aufrufzaehler (Readiness-Sim)
+        "D3B2_RUNTIME_VERIFY_ATTEMPTS": "3",          # Fehlerpfade ohne reales sleep
+        "D3B2_RUNTIME_VERIFY_INTERVAL": "0",
     })
     env.update(over)
     return env, cmdlog, (tmp_path / "state")
@@ -339,6 +348,70 @@ def test_rollback_state_stores_full_digest_not_docker_id(tmp_path):
     rb = json.loads((state_dir / "rollback.json").read_text())
     assert rb["runtime_id"] == _RID and rb["rollback_tag"] == _RB_REF
     assert "old_image_id" not in rb  # keine Docker-.Id mehr
+
+
+def test_capture_rejects_pod_not_matching_deployment_image(tmp_path):
+    # Bei der Rollback-Zielerfassung muss der gewaehlte Pod EXAKT zum gelesenen
+    # Deployment-Image gehoeren. Hier laeuft der Pod mit einem ABWEICHENDEN Image ->
+    # kein kohaerenter Kandidat -> fail closed, kein Deploy.
+    env, cmdlog, state_dir = _setup(tmp_path, FAKE_CAPTURE_POD_IMAGE="inventory-consumer:STALE")
+    res = _run(env, "run")
+    assert res.returncode != 0
+    log = cmdlog.read_text()
+    assert "deploy-consumer" not in log
+    # Bis consumer-schema-ready gekommen, Capture in consumer-deployed scheitert.
+    assert json.loads((state_dir / "state.json").read_text())["step"] == "consumer-schema-ready"
+
+
+def test_missing_pod_selector_fails_closed_in_preflight(tmp_path):
+    # select-consumer-pod.py ist Pflichtabhaengigkeit: fehlt sie, bricht der Preflight
+    # VOR jedem State-Schreiben/Mutation ab (nie als 'kein Pod'/'0 Restarts').
+    env, cmdlog, state_dir = _setup(tmp_path,
+                                    D3B2_POD_SELECT_HELPER=str(tmp_path / "nope.py"))
+    res = _run(env, "preflight")
+    assert res.returncode != 0
+    assert not (state_dir / "state.json").exists()
+    assert "build consumer-db-bootstrap" not in cmdlog.read_text()
+
+
+def test_broken_pod_selector_fails_closed_in_preflight(tmp_path):
+    bad = tmp_path / "broken-selector.py"
+    bad.write_text("this is not valid python :::\n", encoding="utf-8")
+    env, _, state_dir = _setup(tmp_path, D3B2_POD_SELECT_HELPER=str(bad))
+    assert _run(env, "preflight").returncode != 0
+    assert not (state_dir / "state.json").exists()
+
+
+# --- Runtime-Verify-Konfiguration im Preflight validiert (Grenzwerte) -------
+
+@pytest.mark.parametrize("var,bad", [
+    ("D3B2_RUNTIME_VERIFY_ATTEMPTS", "0"),
+    ("D3B2_RUNTIME_VERIFY_ATTEMPTS", "-1"),
+    ("D3B2_RUNTIME_VERIFY_ATTEMPTS", "x"),
+    ("D3B2_RUNTIME_VERIFY_ATTEMPTS", "1001"),     # > Obergrenze 1000
+    ("D3B2_RUNTIME_VERIFY_INTERVAL", "-1"),
+    ("D3B2_RUNTIME_VERIFY_INTERVAL", "x"),
+    ("D3B2_RUNTIME_VERIFY_INTERVAL", "61"),       # > Obergrenze 60
+    ("D3B2_RUNTIME_VERIFY_BUDGET_SECONDS", "0"),
+    ("D3B2_RUNTIME_VERIFY_BUDGET_SECONDS", "-5"),
+    ("D3B2_RUNTIME_VERIFY_BUDGET_SECONDS", "x"),
+    ("D3B2_RUNTIME_VERIFY_BUDGET_SECONDS", "601"),  # > Obergrenze 600
+])
+def test_runtime_verify_config_validated_in_preflight(tmp_path, var, bad):
+    env, cmdlog, state_dir = _setup(tmp_path, **{var: bad})
+    res = _run(env, "preflight")
+    assert res.returncode != 0
+    assert not (state_dir / "state.json").exists()          # vor State-Schreiben
+    assert "build consumer-db-bootstrap" not in cmdlog.read_text()  # vor jeder Mutation
+
+
+def test_runtime_verify_config_upper_bounds_accepted(tmp_path):
+    # Werte exakt an der Obergrenze sind gueltig (preflight schreibt State).
+    env, _, state_dir = _setup(tmp_path, D3B2_RUNTIME_VERIFY_ATTEMPTS="1000",
+                               D3B2_RUNTIME_VERIFY_INTERVAL="60",
+                               D3B2_RUNTIME_VERIFY_BUDGET_SECONDS="600")
+    assert _run(env, "preflight").returncode == 0
+    assert json.loads((state_dir / "state.json").read_text())["step"] == "preflight"
 
 
 # --- Rollback (CRI-verifiziert) --------------------------------------------
