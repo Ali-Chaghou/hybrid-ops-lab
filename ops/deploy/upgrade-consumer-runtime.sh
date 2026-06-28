@@ -49,6 +49,14 @@ RUNTIME_VERIFY_INTERVAL="${D3B2_RUNTIME_VERIFY_INTERVAL:-1}"
 # Aufrufe (je bis ~5s) die naive Rechnung 30x1s sprengen wuerden. Default ~30s; die
 # Versuchszahl bleibt als zusaetzliche obere Schranke (was zuerst greift, stoppt).
 RUNTIME_VERIFY_BUDGET="${D3B2_RUNTIME_VERIFY_BUDGET_SECONDS:-30}"
+# Beschraenkte, read-only Monitoring-Readiness-Wartung NACH dem einmaligen Prometheus-
+# Force-Recreate: Docker 'Started' beweist NICHT, dass HTTP-API, Target-Discovery und
+# Rule-Loading bereit sind (Recreate liefert kurzzeitig 0/0 Targets). Defaults 60x2s,
+# Budget ~90s; fuer Tests ueberschreibbar (vor Verwendung im Preflight validiert).
+# KEINE Mutation in der Schleife.
+MONITORING_VERIFY_ATTEMPTS="${D3B2_MONITORING_VERIFY_ATTEMPTS:-60}"
+MONITORING_VERIFY_INTERVAL="${D3B2_MONITORING_VERIFY_INTERVAL:-2}"
+MONITORING_VERIFY_BUDGET="${D3B2_MONITORING_VERIFY_BUDGET_SECONDS:-90}"
 # Bewusstes Operator-Acknowledgement fuer bestehende Consumer-Restarts (kein Secret).
 ACK_RESTARTS="${D3B2_ACK_CONSUMER_RESTARTS:-0}"
 # Release-Bindung: 40-hex Commit vom Orchestrierungs-Desktop (kein Remote-.git).
@@ -215,7 +223,10 @@ PY
 # Python-Helper, Identity-Parsing, exec) laufen ueber den EINEN Wrapper _dl; Sleeps sind
 # auf die Restzeit gedeckelt. Kein Versuch nach Ablauf.
 _VERIFY_DEADLINE=""
-_begin_verify_deadline() { _VERIFY_DEADLINE=$(( SECONDS + RUNTIME_VERIFY_BUDGET )); }
+# Optionales Argument = Budget in Sekunden (Default RUNTIME_VERIFY_BUDGET). So teilen
+# sich Runtime- und Monitoring-Verifikation dieselbe Deadline-/_dl-Maschinerie, jeweils
+# mit GENAU EINER monotonen Gesamtdeadline pro Aufruf.
+_begin_verify_deadline() { _VERIFY_DEADLINE=$(( SECONDS + ${1:-RUNTIME_VERIFY_BUDGET} )); }
 _clear_verify_deadline() { _VERIFY_DEADLINE=""; }
 _verify_remaining() {
   local r=$(( _VERIFY_DEADLINE - SECONDS )); [ "${r}" -lt 0 ] && r=0; printf '%s' "${r}"
@@ -282,6 +293,23 @@ _validate_runtime_verify_config() {
   _RV_CONFIG_OK=1
 }
 
+# Monitoring-Verify-Konfiguration: gleiche konservativen Obergrenzen wie oben. Wird im
+# Preflight VOR State-Schreiben/Mutation validiert; idempotent.
+_MON_CONFIG_OK=""
+_validate_monitoring_verify_config() {
+  [ -n "${_MON_CONFIG_OK}" ] && return 0
+  printf '%s' "${MONITORING_VERIFY_ATTEMPTS}" | grep -Eq '^[0-9]+$' || fail "MONITORING_VERIFY_ATTEMPTS: Ganzzahl >= 1 erwartet."
+  printf '%s' "${MONITORING_VERIFY_INTERVAL}" | grep -Eq '^[0-9]+$' || fail "MONITORING_VERIFY_INTERVAL: Ganzzahl >= 0 erwartet."
+  printf '%s' "${MONITORING_VERIFY_BUDGET}"   | grep -Eq '^[0-9]+$' || fail "MONITORING_VERIFY_BUDGET: Ganzzahl >= 1 erwartet."
+  { [ "${MONITORING_VERIFY_ATTEMPTS}" -ge 1 ] && [ "${MONITORING_VERIFY_ATTEMPTS}" -le "${_RV_MAX_ATTEMPTS}" ]; } \
+    || fail "MONITORING_VERIFY_ATTEMPTS muss 1..${_RV_MAX_ATTEMPTS} sein."
+  { [ "${MONITORING_VERIFY_INTERVAL}" -ge 0 ] && [ "${MONITORING_VERIFY_INTERVAL}" -le "${_RV_MAX_INTERVAL}" ]; } \
+    || fail "MONITORING_VERIFY_INTERVAL muss 0..${_RV_MAX_INTERVAL} sein."
+  { [ "${MONITORING_VERIFY_BUDGET}" -ge 1 ] && [ "${MONITORING_VERIFY_BUDGET}" -le "${_RV_MAX_BUDGET}" ]; } \
+    || fail "MONITORING_VERIFY_BUDGET muss 1..${_RV_MAX_BUDGET} sein."
+  _MON_CONFIG_OK=1
+}
+
 # Fail-closed Pruefung der Pflichtabhaengigkeit select-consumer-pod.py VOR jeder
 # State-Schreib-/Mutationsoperation: Datei vorhanden, regulaer + lesbar, von Python
 # ladbar und der Selektor grundsaetzlich aufrufbar (--help laedt das Modul + argparse,
@@ -296,6 +324,22 @@ _ensure_pod_selector() {
   python3 "${POD_SELECT_HELPER}" --help >/dev/null 2>&1 \
     || fail "Pod-Selektor nicht ladbar/aufrufbar (Syntax/Argparse defekt) — fail closed."
   _POD_SELECTOR_OK=1
+}
+
+# Gemeinsame, idempotente, READ-ONLY Voraussetzungspruefung fuer JEDE Verifikation
+# (Runtime + Monitoring). MUSS vor jeder State-Schreib-/Mutationsoperation laufen — im
+# frischen `preflight` UND im `resume`. Sonst koennte ein Resume ab consumer-deployed
+# bereits `mon up -d`/Prometheus-Force-Recreate ausfuehren, bevor _verify_monitoring_ready
+# eine ungueltige Monitoring-Konfiguration oder fehlendes `timeout --kill-after` bemerkt.
+# Keine Mutation, kein State-Schreiben; alle Teilpruefungen sind selbst idempotent.
+_validate_verify_prerequisites() {
+  _ensure_pod_selector
+  _validate_runtime_verify_config
+  _validate_monitoring_verify_config
+  need curl
+  need python3
+  need timeout
+  _ensure_kill_after
 }
 
 # Restart-Gate: an die beobachtete Restartzahl gebunden. Eine HOEHERE Zahl als die
@@ -356,17 +400,14 @@ preflight() {
   [ -f "${COMPOSE_FILE}" ] || fail "sites/cloud/docker-compose.yml fehlt — falsches Repository/Site?"
   [ -f "${MON_COMPOSE}" ] || fail "monitoring/docker-compose.yml fehlt"
   [ -f "${REPO_ROOT}/ops/deploy/deploy-consumer.sh" ] || fail "deploy-consumer.sh fehlt"
-  # Pflichtabhaengigkeit Pod-Selektor: vorhanden, lesbar, von Python ladbar (VOR State/Mutation).
-  _ensure_pod_selector
-  # Runtime-Verify-Konfiguration (Attempts/Interval/Budget) VOR State/Mutation validieren.
-  _validate_runtime_verify_config
+  # Gemeinsame Voraussetzungen (Pod-Selektor, Runtime-/Monitoring-Konfig, curl/python3/
+  # timeout, funktionales kill-after) VOR State-Schreiben/Mutation pruefen.
+  _validate_verify_prerequisites
   [ -f "${ENV_FILE}" ] || fail "sites/cloud/.env fehlt (aus .env.example anlegen, starke Werte setzen)"
   "${REPO_ROOT}/ops/deploy/check-local-perms.sh" "${ENV_FILE}" || fail ".env hat unsichere Rechte (chmod 600)"
   grep -Eq '^CONSUMER_DB=.+' "${ENV_FILE}" || fail "CONSUMER_DB nicht gesetzt"
   grep -Eq '^CONSUMER_APP_PASSWORD=.+' "${ENV_FILE}" || fail "CONSUMER_APP_PASSWORD nicht gesetzt (leer = Fail closed)"
   for t in docker k3d kubectl curl python3 timeout; do need "$t"; done
-  # Harte Timeout-Faehigkeit (kill-after) funktional verifizieren, nicht nur Existenz.
-  _ensure_kill_after
   docker compose version >/dev/null 2>&1 || fail "docker compose nicht verfuegbar"
   k3d cluster list 2>/dev/null | grep -q . || fail "kein k3d-Cluster gefunden"
   # Runtime-Tool-Gate VOR State-Schreiben/Mutation: crictl/ctr im k3d-Node funktionsfaehig.
@@ -464,11 +505,12 @@ phase_consumer_deployed() {
 phase_monitoring_ready() {
   log "MONITORING: consumer.json vorhanden? (von deploy-consumer.sh atomar erzeugt)"
   [ -f "${TARGET_DIR}/consumer.json" ] || fail "consumer.json fehlt — Consumer-Target nicht erzeugt"
-  log "PROMETHEUS: kontrolliert neu laden (force-recreate), damit neue prometheus.yml + Rules greifen"
+  log "PROMETHEUS: Stack starten + Prometheus GENAU EINMAL force-recreaten (neue prometheus.yml + Rules)"
   mon up -d || fail "monitoring-Stack-Start fehlgeschlagen"
+  # Force-Recreate GENAU EINMAL pro Phaseninvocation — VOR und AUSSERHALB des Waiters.
   mon up -d --force-recreate --no-deps prometheus || fail "Prometheus-Neuerstellung fehlgeschlagen"
-  log "VERIFY: Consumer-Target up, consumer+queue-Rules geladen, KEINE Publisher-Serie/-Target"
-  _verify_monitoring || fail "Monitoring-Reload-Verifikation fehlgeschlagen"
+  log "VERIFY: beschraenkte read-only Prometheus-Readiness + Targets/Rules (fail closed, KEINE Mutation)"
+  _verify_monitoring_ready || fail "Monitoring-Readiness-Verifikation fehlgeschlagen — fail closed"
   write_state monitoring-ready false
 }
 
@@ -477,7 +519,8 @@ phase_verified() {
   _verify_consumer_schema || fail "D1-Schema-Verifikation fehlgeschlagen"
   _verify_consumer_runtime || fail "D1-Runtime-Verifikation fehlgeschlagen"
   _verify_queue || fail "D2-Queue-/DLQ-Verifikation fehlgeschlagen"
-  _verify_monitoring || fail "D2-Monitoring-Verifikation fehlgeschlagen"
+  # Dieselbe sichere, read-only Monitoring-Verifikation — OHNE erneuten Force-Recreate.
+  _verify_monitoring_ready || fail "D2-Monitoring-Verifikation fehlgeschlagen"
   write_state verified false
 }
 
@@ -661,15 +704,172 @@ sys.exit(0)" >/dev/null 2>&1 && hrc=0 || hrc=$?
   return 1
 }
 
-_verify_monitoring() {
-  local t r; t="$(curl -s --max-time 6 "${PROM_ENDPOINT}/api/v1/targets?state=active" 2>/dev/null || echo '')"
-  printf '%s' "$t" | grep -q '"job":"consumer"' || return 1
-  r="$(curl -s --max-time 6 "${PROM_ENDPOINT}/api/v1/rules" 2>/dev/null || echo '')"
-  printf '%s' "$r" | grep -q '"name":"consumer"' || return 1
-  printf '%s' "$r" | grep -q '"name":"queue"' || return 1
-  # KEINE Publisher-Serie/-Target erwartet.
-  printf '%s' "$t" | grep -q '"job":"publisher"' && return 1
-  return 0
+# ---- Bounded, read-only Monitoring-Readiness-Verifikation -------------------
+# Strukturelle JSON-Auswertung (kein grep): liest Targets-/Rules-JSON von stdin und gibt
+# GENAU einen nicht-sensiblen Token aus — niemals Roh-JSON. Keine Mutation.
+_MON_TARGETS_PARSER='import json,sys
+try:
+    d=json.load(sys.stdin)
+except Exception:
+    print("BAD_JSON");sys.exit(0)
+if not isinstance(d,dict):
+    print("BAD_JSON");sys.exit(0)
+if d.get("status")!="success":
+    print("BAD_STATUS");sys.exit(0)
+data=d.get("data")
+ts=data.get("activeTargets") if isinstance(data,dict) else None
+if not isinstance(ts,list):
+    print("BAD_JSON");sys.exit(0)
+cons=[]
+for t in ts:
+    if not isinstance(t,dict):
+        print("BAD_JSON");sys.exit(0)
+    lbl=t.get("labels") if isinstance(t.get("labels"),dict) else {}
+    job=lbl.get("job")
+    if job=="publisher":
+        print("PUBLISHER");sys.exit(0)
+    if job=="consumer":
+        cons.append(t)
+if not cons:
+    print("NO_CONSUMER");sys.exit(0)
+for t in cons:
+    if t.get("health")!="up":
+        print("CONSUMER_DOWN");sys.exit(0)
+print("OK")'
+
+_MON_RULES_PARSER='import json,sys
+try:
+    d=json.load(sys.stdin)
+except Exception:
+    print("BAD_JSON");sys.exit(0)
+if not isinstance(d,dict):
+    print("BAD_JSON");sys.exit(0)
+if d.get("status")!="success":
+    print("BAD_STATUS");sys.exit(0)
+data=d.get("data")
+gs=data.get("groups") if isinstance(data,dict) else None
+if not isinstance(gs,list):
+    print("BAD_JSON");sys.exit(0)
+names=set()
+for g in gs:
+    if isinstance(g,dict):
+        names.add(g.get("name"))
+if "consumer" not in names:
+    print("NO_CONSUMER_RULE");sys.exit(0)
+if "queue" not in names:
+    print("NO_QUEUE_RULE");sys.exit(0)
+print("OK")'
+
+# Fuehrt den Parser-Helper deadlinegebunden aus und klassifiziert SEINEN echten Exit-Code
+# (kein '|| true'). Bei Exit 0 wird der Token via stdout zurueckgegeben; sonst wird ein
+# fester Reason-Token gedruckt und ein Code zurueckgegeben, den _mon_check_once auf seine
+# eigene Semantik (1 transient / 3 fatal) abbildet:
+#   0  -> Parser-Token auf stdout, return 0
+#   1  -> Deadline-/Parser-Timeout (124/137): 'parser-timeout', return 1 (durch Deadline beendet)
+#   3  -> Tool-/Prozessfehler (125/126/127 oder jeder andere !=0): 'parser-error', return 3
+# Roh-JSON wird NIE ausgegeben; stderr des Parsers wird verworfen.
+_mon_parse() {
+  local script="$1" body="$2" out prc=0
+  out="$(printf '%s' "${body}" | _dl python3 -c "${script}")" || prc=$?
+  if [ "${prc}" -eq 0 ]; then printf '%s' "${out}"; return 0; fi
+  if _is_timeout_rc "${prc}"; then printf 'parser-timeout'; return 1; fi
+  # 125/126/127 (timeout-intern/nicht ausfuehrbar/nicht gefunden) sowie jeder andere
+  # Prozessfehler -> sofort fatal, NICHT als bad-json bis zum Limit retryen.
+  printf 'parser-error'; return 3
+}
+
+# Eine read-only Einzelpruefung ALLER Monitoring-Bedingungen, gebunden an die
+# gemeinsame Deadline (alle curl/python via _dl). Body UND HTTP-Code stammen aus DERSELBEN
+# curl-Anfrage (`-w '\n%{http_code}'`, keine Temp-Dateien); nur HTTP 200 wird geparst.
+# Gibt GENAU einen nicht-sensiblen Reason-Token aus; loggt nie Roh-JSON. Rueckgabe:
+#   0  alle Bedingungen erfuellt
+#   2  Publisher-Target = Policy-Verletzung -> sofort fail closed (kein Retry)
+#   3  Tool-/Parser-Fehler (nicht ausfuehrbar) -> sofort fail closed
+#   1  transient/retryfaehig (Token nennt den Grund), inkl. Nicht-2xx
+_mon_check_once() {
+  local code rc resp body parse
+  # 1) /-/ready == HTTP 200 (ohne -f, damit 503/000 als Code lesbar bleiben).
+  rc=0; code="$(_dl curl -sS -o /dev/null -w '%{http_code}' "${PROM_ENDPOINT}/-/ready" 2>/dev/null)" || rc=$?
+  if _is_toolerr_rc "${rc}"; then printf 'tool-error'; return 3; fi
+  if _is_timeout_rc "${rc}"; then printf 'prom-timeout'; return 1; fi
+  if [ "${code}" != "200" ]; then printf 'not-ready'; return 1; fi   # conn-refused -> "000"
+
+  # 2) Targets-API: Body + HTTP-Code aus EINER Anfrage. Nur 200 wird geparst; Nicht-2xx
+  #    ist transient (retryfaehig), darf aber NIE ueber success-foermiges JSON gewinnen.
+  rc=0; resp="$(_dl curl -sS -w '\n%{http_code}' "${PROM_ENDPOINT}/api/v1/targets?state=active" 2>/dev/null)" || rc=$?
+  if _is_toolerr_rc "${rc}"; then printf 'tool-error'; return 3; fi
+  if _is_timeout_rc "${rc}"; then printf 'prom-timeout'; return 1; fi
+  if [ "${rc}" -ne 0 ]; then printf 'targets-unreachable'; return 1; fi   # conn-refused/Transport
+  code="${resp##*$'\n'}"; body="${resp%$'\n'*}"
+  [ "${code}" = "200" ] || { printf 'targets-http-%s' "${code:-000}"; return 1; }
+  parse="$(_mon_parse "${_MON_TARGETS_PARSER}" "${body}")" || { rc=$?; printf '%s' "${parse}"; return "${rc}"; }
+  case "${parse}" in
+    PUBLISHER)     printf 'publisher-target'; return 2 ;;
+    OK)            : ;;
+    NO_CONSUMER)   printf 'no-consumer-target'; return 1 ;;
+    CONSUMER_DOWN) printf 'consumer-target-down'; return 1 ;;
+    BAD_STATUS)    printf 'targets-bad-status'; return 1 ;;
+    *)             printf 'targets-bad-json'; return 1 ;;
+  esac
+
+  # 3) Rules-API: ebenso Body + HTTP-Code aus EINER Anfrage, nur 200 wird geparst.
+  rc=0; resp="$(_dl curl -sS -w '\n%{http_code}' "${PROM_ENDPOINT}/api/v1/rules" 2>/dev/null)" || rc=$?
+  if _is_toolerr_rc "${rc}"; then printf 'tool-error'; return 3; fi
+  if _is_timeout_rc "${rc}"; then printf 'prom-timeout'; return 1; fi
+  if [ "${rc}" -ne 0 ]; then printf 'rules-unreachable'; return 1; fi
+  code="${resp##*$'\n'}"; body="${resp%$'\n'*}"
+  [ "${code}" = "200" ] || { printf 'rules-http-%s' "${code:-000}"; return 1; }
+  parse="$(_mon_parse "${_MON_RULES_PARSER}" "${body}")" || { rc=$?; printf '%s' "${parse}"; return "${rc}"; }
+  case "${parse}" in
+    OK)               printf 'ok'; return 0 ;;
+    NO_CONSUMER_RULE) printf 'no-consumer-rule'; return 1 ;;
+    NO_QUEUE_RULE)    printf 'no-queue-rule'; return 1 ;;
+    BAD_STATUS)       printf 'rules-bad-status'; return 1 ;;
+    *)                printf 'rules-bad-json'; return 1 ;;
+  esac
+}
+
+# Secret-freie Diagnose: nur Reason-Token, Versuch, Budget, elapsed/remaining, Modus.
+_mon_diag() {
+  local reason="$1" att="$2" n="$3" start="$4" mode="${5:-deadline/attempts}"
+  log "MONITORING-VERIFY: nicht bestaetigt [reason=${reason}] [versuch=${att}/${n}] [budget=${MONITORING_VERIFY_BUDGET}s] [elapsed=$(( SECONDS - start ))s] [remaining=$(_verify_remaining)s] [abbruch=${mode}]"
+}
+
+# Oeffentlicher Einstieg: GENAU EINE gemeinsame Monitoring-Deadline; raeumt sie auf
+# jedem Return-Pfad wieder auf (ohne globale Traps zu beruehren). Read-only, fail closed.
+_verify_monitoring_ready() {
+  _validate_monitoring_verify_config   # defensiv (Erstvalidierung erfolgt im Preflight)
+  _begin_verify_deadline "${MONITORING_VERIFY_BUDGET}"
+  local rc=0
+  _verify_monitoring_seq || rc=$?
+  _clear_verify_deadline
+  return "${rc}"
+}
+
+# Beschraenkte, read-only Retry-Schleife unter der bereits gesetzten Deadline. KEINE
+# Mutation (kein recreate/restart/up). Publisher-Target und Tool-Fehler brechen SOFORT
+# ab; transiente Startupzustaende werden bis zur Deadline/Versuchsgrenze erneut geprueft.
+_verify_monitoring_seq() {
+  local n="${MONITORING_VERIFY_ATTEMPTS}" iv="${MONITORING_VERIFY_INTERVAL}"
+  local i start reason res crc rem slp
+  start="${SECONDS}"; i=1; reason="startup"
+  while :; do
+    _verify_deadline_reached && break
+    crc=0; res="$(_mon_check_once)" || crc=$?
+    case "${crc}" in
+      0) return 0 ;;
+      2) _mon_diag "${res}" "${i}" "${n}" "${start}" policy-violation; return 1 ;;
+      3) _mon_diag "${res}" "${i}" "${n}" "${start}" fatal-tool; return 1 ;;
+      *) reason="${res}" ;;
+    esac
+    [ "${i}" -ge "${n}" ] && break
+    _verify_deadline_reached && break
+    rem="$(_verify_remaining)"; slp="${iv}"; [ "${slp}" -gt "${rem}" ] && slp="${rem}"
+    [ "${slp}" -gt 0 ] && sleep "${slp}"
+    i=$((i+1))
+  done
+  _mon_diag "${reason}" "${i}" "${n}" "${start}" deadline/attempts
+  return 1
 }
 
 # ---- Rollback (deterministisch, CRI/containerd-digest-verifiziert) -----------
@@ -779,7 +979,7 @@ _run_from() {
 cmd_run() {
   # detect_runtime_tools laeuft im fresh-run ueber preflight (vor jeder Mutation);
   # ein No-op-Lauf auf bereits 'complete' fasst den Node bewusst NICHT an.
-  with_lock; validate_release_sha; restart_gate
+  with_lock; validate_release_sha; _validate_verify_prerequisites; restart_gate
   if [ -f "${STATE_FILE}" ]; then
     local cur; cur="$(get_step)"
     if [ "${cur}" = "complete" ]; then
@@ -793,7 +993,10 @@ cmd_run() {
 }
 
 cmd_resume() {
-  with_lock; validate_release_sha; detect_runtime_tools; restart_gate
+  # Voraussetzungen (inkl. Monitoring-Konfig + kill-after) VOR detect_runtime_tools,
+  # restart_gate und jeder Phase pruefen — ein Resume ab consumer-deployed darf NICHTS
+  # mutieren/recreaten, wenn eine Voraussetzung fehlschlagen wuerde (fail closed).
+  with_lock; validate_release_sha; _validate_verify_prerequisites; detect_runtime_tools; restart_gate
   [ -f "${STATE_FILE}" ] || fail "Kein State zum Fortsetzen — 'run' verwenden."
   local cur; cur="$(get_step)"
   [ -n "$cur" ] || fail "State-Datei vorhanden, aber unlesbar/korrupt — Abbruch (kein blindes Fortsetzen)."

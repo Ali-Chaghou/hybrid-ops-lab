@@ -116,13 +116,62 @@ verifiziert, dass der Release-Tag im CRI-Store auflösbar ist **und** die laufen
 Pod-Digest exakt zu seiner CRI-Identität gehört (nicht nur das Spec-Image stimmt). **Keine**
 Löschung von DB/Queue, **kein** Purge; State zurück auf den letzten guten Schritt, Resume möglich.
 
-## Monitoring-Reload
-Der Consumer erzeugt `consumer.json` atomar. Danach wird Prometheus **kontrolliert neu
-erstellt** (`docker compose up -d --force-recreate --no-deps prometheus`), damit neue
-`prometheus.yml` + Consumer-/Queue-Rules **tatsächlich** geladen werden. Anschließend
-**über die HTTP-API verifiziert**: Consumer-Target vorhanden und `up`, `consumer`- und
-`queue`-Rule-Gruppe geladen, **keine** Publisher-Serie/-Target, keine unerwarteten
-Alerts. `docker compose up -d` ohne nachgewiesenen Reload genügt **nicht**.
+## Monitoring-Reload (bounded, read-only, fail closed)
+Der Consumer erzeugt `consumer.json` atomar. `phase_monitoring_ready` führt dann **in
+fester Reihenfolge** aus:
+1. `consumer.json` vorhanden;
+2. Monitoring-Stack starten (`mon up -d`);
+3. Prometheus **genau einmal** force-recreaten (`up -d --force-recreate --no-deps
+   prometheus`) — **außerhalb** und **vor** der Warteschleife;
+4. **bounded read-only Waiter** (`_verify_monitoring_ready`);
+5. `monitoring-ready` **nur** nach bewiesenem Erfolg.
+
+**Warum der Waiter:** Docker meldet „Started", **bevor** Prometheus' HTTP-API,
+Target-Discovery und Rule-Loading bereit sind — direkt nach dem Recreate liefert die
+API kurzzeitig **0/0 Targets**. Eine **einzelne** sofortige Verifikation schlägt dann
+fälschlich fehl. Der Waiter prüft daher wiederholt (read-only, **keine** Mutation in der
+Schleife), bis **alle** Bedingungen erfüllt sind oder die Deadline greift:
+
+- `/-/ready` liefert exakt HTTP 200;
+- Targets-/Rules-API: **Body und HTTP-Status stammen aus derselben Anfrage**
+  (`curl -w '\n%{http_code}'`, keine Temp-Datei); **nur HTTP 200** wird geparst —
+  ein Nicht-2xx-Status kann **niemals** über strukturell passend aussehendes JSON
+  erfolgreich werden;
+- der Parser verlangt zusätzlich Top-Level-Objekt **und** `status == "success"`
+  (fehlender/anderer Status → niemals Erfolg), dann erst die `data`-Struktur;
+- ≥ 1 aktives Target mit `labels.job == "consumer"`, **alle** Consumer-Targets `health == "up"`;
+- **kein** aktives Target mit `labels.job == "publisher"` → **Policy-Verletzung, sofortiger
+  Abbruch** (nicht als Startup-Delay retryt);
+- Rules-API: Rule-Gruppen `consumer` **und** `queue` geladen.
+
+**Transiente** Startupzustände werden innerhalb der gemeinsamen Schranke erneut geprüft:
+Connection-refused/`/-/ready`≠200, **Nicht-2xx auf Targets/Rules**, 0/0 Targets,
+Consumer-Target noch nicht `up`, Rules noch nicht geladen, leere/unvollständige Antworten,
+`status != "success"`. Der **Parser-Exit-Code** wird ausgewertet (kein `|| true`): Timeout
+(124/137) endet kontrolliert über die Deadline; ein Tool-Fehler (Parser nicht ausführbar,
+125/126/127) ist **sofort fatal** und wird **nicht** als „malformed" bis zum Limit retryt.
+
+**Zeitbudget:** genau **eine** monotone Gesamtdeadline pro Waiter-Aufruf (kein frisches
+Budget je Endpoint/Versuch). Jeder `curl` und jeder JSON-Parser läuft über den zentralen
+`_dl`-Wrapper (`timeout --kill-after`); Sleeps sind auf die Restzeit gedeckelt; nach
+Ablauf **fail closed**. Konfiguration (im **Preflight** vor State/Mutation validiert,
+konservative Obergrenzen):
+- `D3B2_MONITORING_VERIFY_ATTEMPTS` (Default 60, 1…1000)
+- `D3B2_MONITORING_VERIFY_INTERVAL` (Default 2, 0…60)
+- `D3B2_MONITORING_VERIFY_BUDGET_SECONDS` (Default 90, 1…600)
+
+Diese Konfiguration **sowie** `timeout --kill-after`, `curl`, `python3` und der
+Pod-Selektor werden über **eine gemeinsame Voraussetzungsfunktion**
+(`_validate_verify_prerequisites`) geprüft — sowohl im `preflight` als auch in
+`resume` **vor** `restart_gate`/`_run_from` und damit vor jeder State-Schreib- oder
+Mutationsoperation. Ein Resume ab `consumer-deployed` führt also **kein** `mon up -d`
+und **keinen** Force-Recreate aus, wenn eine Voraussetzung (z. B. ungültige Monitoring-
+Konfiguration oder fehlendes `--kill-after`) fehlschlägt (fail closed).
+
+**Diagnose** ist secret-frei: nur Reason-Token, Versuch/Gesamt, Budget, elapsed/remaining,
+Abbruchgrund — **niemals** Roh-JSON, vollständige API-Antworten, URLs mit Credentials,
+Env-Inhalte oder Hosts. `phase_verified` nutzt **denselben** Waiter read-only, **ohne**
+erneuten Force-Recreate. `docker compose up -d` ohne nachgewiesene Readiness genügt **nicht**.
 
 ## Verifikation (read-only)
 - **D1:** Consumer healthy/ready, DB erreichbar, Inbox+Projection vorhanden,

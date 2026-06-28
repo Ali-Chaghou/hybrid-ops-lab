@@ -108,8 +108,15 @@ case "$url" in
     fi
     exit 0 ;;
   *Action=GetQueueAttributes*) echo '<r><Attribute><Name>RedrivePolicy</Name><Value>{"maxReceiveCount":"5"}</Value></Attribute></r>'; exit 0 ;;
-  *api/v1/targets*) if [ "${PROM_FAIL:-0}" = "1" ]; then echo '{"data":{"activeTargets":[]}}'; else echo '{"data":{"activeTargets":[{"labels":{"job":"consumer"},"health":"up"}]}}'; fi; exit 0 ;;
-  *api/v1/rules*) echo '{"data":{"groups":[{"name":"consumer"},{"name":"queue"}]}}'; exit 0 ;;
+  *-/ready*) if [ "${PROM_READY_FAIL:-0}" = "1" ]; then printf '503'; else printf '200'; fi; exit 0 ;;
+  *api/v1/targets*)
+    if [ "${PROM_PUBLISHER:-0}" = "1" ]; then printf '%s' '{"status":"success","data":{"activeTargets":[{"labels":{"job":"consumer"},"health":"up"},{"labels":{"job":"publisher"},"health":"up"}]}}';
+    elif [ "${PROM_FAIL:-0}" = "1" ]; then printf '%s' '{"status":"success","data":{"activeTargets":[]}}';
+    else printf '%s' '{"status":"success","data":{"activeTargets":[{"labels":{"job":"consumer"},"health":"up"}]}}'; fi
+    printf '\n%s' "${PROM_HTTP:-200}"; exit 0 ;;
+  *api/v1/rules*)
+    printf '%s' '{"status":"success","data":{"groups":[{"name":"consumer"},{"name":"queue"}]}}'
+    printf '\n%s' "${PROM_HTTP:-200}"; exit 0 ;;
 esac
 echo '{}'; exit 0
 """
@@ -149,6 +156,9 @@ def _setup(tmp_path, **over):
         "FAKE_LQ_COUNTER": str(tmp_path / "lq.cnt"),  # ListQueues-Aufrufzaehler (Readiness-Sim)
         "D3B2_RUNTIME_VERIFY_ATTEMPTS": "3",          # Fehlerpfade ohne reales sleep
         "D3B2_RUNTIME_VERIFY_INTERVAL": "0",
+        "D3B2_MONITORING_VERIFY_ATTEMPTS": "3",       # Monitoring-Waiter ohne reales sleep
+        "D3B2_MONITORING_VERIFY_INTERVAL": "0",
+        "D3B2_MONITORING_VERIFY_BUDGET_SECONDS": "5",
     })
     env.update(over)
     return env, cmdlog, (tmp_path / "state")
@@ -581,3 +591,140 @@ def test_corrupt_state_resume_fails_closed(tmp_path):
     state_dir.mkdir(parents=True)
     (state_dir / "state.json").write_text("{corrupt", encoding="utf-8")
     assert _run(env, "resume").returncode != 0
+
+
+# --- Monitoring-Readiness (bounded, read-only, fail closed) -----------------
+
+def test_monitoring_recreate_exactly_once_on_success(tmp_path):
+    env, cmdlog, state_dir = _setup(tmp_path)
+    assert _run(env, "run").returncode == 0
+    log = cmdlog.read_text()
+    assert log.count("up -d --force-recreate --no-deps prometheus") == 1
+    assert json.loads((state_dir / "state.json").read_text())["step"] == "complete"
+
+
+def test_monitoring_recreate_exactly_once_even_with_retries(tmp_path):
+    # 0/0 Targets -> Waiter retryt; der Force-Recreate liegt AUSSERHALB der Schleife und
+    # darf trotz mehrerer Verifikationsversuche genau einmal erfolgen.
+    env, cmdlog, state_dir = _setup(tmp_path, PROM_FAIL="1")
+    assert _run(env, "run").returncode != 0
+    log = cmdlog.read_text()
+    assert log.count("up -d --force-recreate --no-deps prometheus") == 1
+    assert json.loads((state_dir / "state.json").read_text())["step"] == "consumer-deployed"
+
+
+def test_monitoring_no_mutation_inside_retry(tmp_path):
+    # Im Monitoring-Retry darf nichts neu erstellt/gestartet werden. Jede Mutation darf
+    # nur GENAU EINMAL in ihrer eigenen Phase auftreten — der Retry verdoppelt nichts.
+    env, cmdlog, _ = _setup(tmp_path, PROM_FAIL="1")
+    assert _run(env, "run").returncode != 0
+    log = cmdlog.read_text()
+    assert log.count("up -d --force-recreate --no-deps prometheus") == 1   # nicht je Versuch
+    assert log.count("up -d --force-recreate --no-deps sqs") == 1          # Queue-Phase, einmal
+    assert "set image" not in log and "rollout restart" not in log
+
+
+def test_monitoring_failure_leaves_state_consumer_deployed(tmp_path):
+    env, _, state_dir = _setup(tmp_path, PROM_FAIL="1")
+    assert _run(env, "run").returncode != 0
+    assert json.loads((state_dir / "state.json").read_text())["step"] == "consumer-deployed"
+
+
+def test_monitoring_success_writes_monitoring_ready(tmp_path):
+    # Resume ab consumer-deployed: Monitoring wird verifiziert und der State durchlaeuft
+    # monitoring-ready -> verified -> complete (nur bei bewiesenem Monitoring).
+    env, cmdlog, state_dir = _setup(tmp_path)
+    _simulate_prior_deploy(env)
+    _seed_state(state_dir, "consumer-deployed")
+    assert _run(env, "resume").returncode == 0
+    assert json.loads((state_dir / "state.json").read_text())["step"] == "complete"
+
+
+def test_publisher_target_fails_monitoring_closed(tmp_path):
+    # Publisher-Target = Policy-Verletzung -> sofort fail closed, State bleibt stehen.
+    env, out_dir, state_dir = _setup(tmp_path, PROM_PUBLISHER="1")
+    res = _run(env, "run")
+    assert res.returncode != 0
+    assert json.loads((state_dir / "state.json").read_text())["step"] == "consumer-deployed"
+
+
+def test_resume_from_consumer_deployed_skips_earlier_phases(tmp_path):
+    env, cmdlog, state_dir = _setup(tmp_path)
+    _simulate_prior_deploy(env)
+    _seed_state(state_dir, "consumer-deployed")
+    assert _run(env, "resume").returncode == 0
+    log = cmdlog.read_text()
+    # Keine Queue-/DB-/Migration-/Consumer-Deploy-Phase erneut.
+    assert "force-recreate --no-deps sqs" not in log
+    assert "run --rm --no-deps consumer-db-bootstrap" not in log
+    assert "run --rm --no-deps consumer-migrate" not in log
+    assert "deploy-consumer" not in log
+    assert json.loads((state_dir / "state.json").read_text())["step"] == "complete"
+
+
+@pytest.mark.parametrize("var,bad", [
+    ("D3B2_MONITORING_VERIFY_ATTEMPTS", "0"),
+    ("D3B2_MONITORING_VERIFY_ATTEMPTS", "-1"),
+    ("D3B2_MONITORING_VERIFY_ATTEMPTS", "x"),
+    ("D3B2_MONITORING_VERIFY_ATTEMPTS", "1001"),
+    ("D3B2_MONITORING_VERIFY_INTERVAL", "-1"),
+    ("D3B2_MONITORING_VERIFY_INTERVAL", "x"),
+    ("D3B2_MONITORING_VERIFY_INTERVAL", "61"),
+    ("D3B2_MONITORING_VERIFY_BUDGET_SECONDS", "0"),
+    ("D3B2_MONITORING_VERIFY_BUDGET_SECONDS", "x"),
+    ("D3B2_MONITORING_VERIFY_BUDGET_SECONDS", "601"),
+])
+def test_invalid_monitoring_config_fails_before_state(tmp_path, var, bad):
+    env, cmdlog, state_dir = _setup(tmp_path, **{var: bad})
+    res = _run(env, "preflight")
+    assert res.returncode != 0
+    assert not (state_dir / "state.json").exists()                 # vor State-Schreiben
+    assert "build consumer-db-bootstrap" not in cmdlog.read_text()  # vor jeder Mutation
+
+
+def test_monitoring_logs_no_raw_api_json(tmp_path):
+    env, _, _ = _setup(tmp_path, PROM_FAIL="1")
+    res = _run(env, "run")
+    assert res.returncode != 0
+    blob = res.stdout + res.stderr
+    for leak in ("activeTargets", '"groups"', '"labels"', '"health"', '"data"'):
+        assert leak not in blob
+
+
+# --- Blocker 1: Resume prueft Voraussetzungen VOR jeder Mutation ------------
+
+def test_resume_invalid_monitoring_config_fails_before_mutation(tmp_path):
+    # Resume ab consumer-deployed mit ungueltiger Monitoring-Konfig -> Abbruch in
+    # _validate_verify_prerequisites VOR mon-up/Force-Recreate; State unveraendert.
+    env, cmdlog, state_dir = _setup(tmp_path, D3B2_MONITORING_VERIFY_BUDGET_SECONDS="0")
+    _simulate_prior_deploy(env)
+    _seed_state(state_dir, "consumer-deployed")
+    res = _run(env, "resume")
+    assert res.returncode != 0
+    log = cmdlog.read_text()
+    assert "mon up" not in log.replace("docker compose", "mon")  # defensiv
+    assert "up -d --force-recreate --no-deps prometheus" not in log
+    assert "force-recreate" not in log
+    assert json.loads((state_dir / "state.json").read_text())["step"] == "consumer-deployed"
+
+
+def test_resume_broken_kill_after_fails_before_mutation(tmp_path):
+    # Resume mit nicht funktionierendem `timeout --kill-after` -> _ensure_kill_after in
+    # den Voraussetzungen bricht VOR jeder Monitoring-Mutation ab (kein Force-Recreate).
+    env, cmdlog, state_dir = _setup(tmp_path)
+    fb = tmp_path / "bin"
+    real_timeout = shutil.which("timeout") or "/usr/bin/timeout"
+    # Fake timeout OHNE --kill-after-Unterstuetzung (Probe schlaegt fehl).
+    (fb / "timeout").write_text(
+        "#!/usr/bin/env bash\n"
+        'case "$1" in --kill-after*) echo "timeout: unrecognized option" >&2; exit 125;; esac\n'
+        f'exec {real_timeout} "$@"\n', encoding="utf-8")
+    os.chmod(fb / "timeout", 0o755)
+    _simulate_prior_deploy(env)
+    _seed_state(state_dir, "consumer-deployed")
+    res = _run(env, "resume")
+    assert res.returncode != 0
+    log = cmdlog.read_text()
+    assert "up -d --force-recreate --no-deps prometheus" not in log
+    assert "force-recreate" not in log
+    assert json.loads((state_dir / "state.json").read_text())["step"] == "consumer-deployed"
