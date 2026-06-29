@@ -1,8 +1,11 @@
 # Sicherheit
 
+[Übersicht](README.md) · [Dokumentation](docs/README.md) · [Status & Roadmap](docs/roadmap.md) · [Nachweise](docs/evidence-index.md) · [Security](SECURITY.md)
+
 ## Grundsatz
 
-Dieses Repository enthält keine produktiven Secrets, IP-Adressen oder Hostnamen.
+Dieses Repository enthält keine produktiven Zugangsdaten und keine realen privaten
+IP-Adressen oder Hostnamen aus der betriebenen Umgebung.
 Alle sensitiven Werte werden ausschließlich über Umgebungsvariablen oder
 lokale Dateien übergeben, die nicht committed werden.
 
@@ -15,19 +18,24 @@ lokale Dateien übergeben, die nicht committed werden.
 | `*.env`             | Lokale Laufzeitkonfiguration       | Ja – nie committen   |
 | `*.tfvars`          | Lokale Tofu-Variablen              | Ja – nie committen   |
 
-## LocalStack-Credentials
+## Lokaler SQS-Endpoint (ElasticMQ)
 
-LocalStack benötigt formal AWS-Credentials, akzeptiert aber beliebige Dummy-Werte.
-In allen Beispiel-Dateien stehen die offiziellen LocalStack-Dummies:
+Das Lab nutzt **ElasticMQ** als lokalen, SQS-kompatiblen Endpoint (siehe
+[ADR-005](docs/decisions/005-elasticmq-statt-localstack.md)), nicht LocalStack. Daraus
+folgt für Credentials:
 
-```
-AWS_ACCESS_KEY_ID=test
-AWS_SECRET_ACCESS_KEY=test
-```
+- Dummy-Werte gegen einen lokalen Emulator sind **keine** echten Cloud-Credentials und
+  geben keinen Zugang zu echten AWS-Ressourcen.
+- Es dürfen **keine** echten AWS-Zugangsdaten in `*.env.example`, Terraform-Beispiele,
+  Logs oder Screenshots gelangen.
+- Leere oder lokale Beispielwerte dürfen **niemals** für echte AWS-Endpunkte verwendet
+  werden.
+- `.env`, `make.env`, `*.tfvars`, State-Dateien und private Schlüssel bleiben gitignored
+  und werden nie committet.
 
-Diese Werte funktionieren ausschließlich gegen LocalStack.
-Sie sind absichtlich als Dummy-Credentials gekennzeichnet und haben keinen Zugang
-zu echten AWS-Ressourcen.
+Pflicht-Passwörter in `*.env.example` sind leer: vor der Nutzung lokal starke
+Zufallswerte setzen. Leere oder abgelehnte Platzhalter führen zum kontrollierten
+Abbruch von Bootstrap und Deploy.
 
 ## Schutzschichten gegen versehentliche Secret-Commits
 
@@ -43,6 +51,24 @@ Das Repository setzt drei Schichten ein:
 pre-commit install          # einmalig nach dem Klonen
 pre-commit run --all-files  # manueller Durchlauf
 ```
+
+Nach `pre-commit install` laufen die lokalen Hooks bei Commits. Die CI führt zusätzliche
+Validierungs- und Secret-Checks aus. Eine einmalige Abschlussprüfung der
+gesamten Git-Historie ist ein eigener Schritt vor einem Release-Tag und in der
+[Roadmap](docs/roadmap.md) aufgeführt.
+
+## Prüfungen für das öffentliche Repository
+
+Dieses Repository ist öffentlich. Vor einem Release-/Tag-Kandidaten gilt folgende
+Checkliste:
+
+- **Secret-Scan** der getrackten Dateien (z. B. `gitleaks`, falls verfügbar).
+- **Git-Historie** auf alte Secrets prüfen (Historien-Scan getrennt durchführen).
+- **Screenshots visuell prüfen** (`docs/img/*`) auf sichtbare Hosts, IPs, Tokens.
+- **EXIF-/Metadaten** der Bilder prüfen.
+- **Keine internen Hosts, IP-Adressen oder Benutzernamen** in Nachweisen/Handoffs.
+- **Keine vollständigen Secrets in Logs**; Funde nur redigiert (Datei, Zeile, Typ,
+  redigierter Fingerprint) melden.
 
 ## Meldung von Sicherheitsproblemen
 

@@ -12,17 +12,6 @@ validate:tofu-fmt:
   script:
     - tofu fmt -check -recursive infra/
 
-validate:tofu-dc:
-  stage: validate
-  image:
-    name: ghcr.io/opentofu/opentofu:1.12.1
-    entrypoint: [""]
-  rules:
-    - exists:
-        - infra/environments/dc/*.tf
-  script:
-    - cd infra/environments/dc && tofu init -backend=false && tofu validate
-
 validate:tofu-cloud:
   stage: validate
   image:
@@ -34,11 +23,24 @@ validate:tofu-cloud:
   script:
     - cd infra/environments/cloud && tofu init -backend=false && tofu validate
 
+validate:tofu-proxmox:
+  stage: validate
+  image:
+    name: ghcr.io/opentofu/opentofu:1.12.1
+    entrypoint: [""]
+  rules:
+    - exists:
+        - infra/proxmox/*.tf
+  script:
+    - cd infra/proxmox
+    - tofu init -backend=false
+    - tofu validate
+
 validate:shellcheck:
   stage: validate
   image: koalaman/shellcheck-alpine:stable
   script:
-    - find . -name "*.sh" -print0 | xargs -0 -r shellcheck --severity=warning
+    - find . -type f -name "*.sh" -not -path "./.git/*" -exec shellcheck --severity=warning {} +
 
 validate:yaml:
   stage: validate
@@ -49,7 +51,7 @@ validate:yaml:
 validate:secrets:
   stage: validate
   image:
-    name: zricethezav/gitleaks:latest
+    name: zricethezav/gitleaks:v8.18.4
     entrypoint: [""]
   script:
-    - gitleaks detect --source . --no-banner
+    - gitleaks detect --source . --no-banner --redact

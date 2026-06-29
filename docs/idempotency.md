@@ -121,10 +121,12 @@ SQS/ElasticMQ in die DLQ (`inventory-movements-dlq`) verschoben — die Anwendun
 verschiebt nichts manuell. Damit endet die zuvor mögliche Endlos-Redelivery.
 Details: [ADR-007](decisions/007-dlq-and-redrive.md).
 
-**Reifegrenze:** Diese Schutzmechanismen sind **im Repository vorhanden**, aber
-**noch nicht live deployed/auf der VM verifiziert**. Der **Outbox-Publisher ist
-weiterhin nicht implementiert**, **Phase 3 ist nicht aktiviert** (`EVENTS_ENABLED=false`),
-und es gibt weiterhin **keine Exactly-once-Garantie**.
+**Reifegrenze:** Diese Schutzmechanismen (Consumer-Idempotenz = D1, DLQ/Redrive = D2) sind
+mit Gate D3B2.1 **live auf site-cloud im synthetischen Lab verifiziert**
+([Abschlussnachweis D3B2.1](handoff-d3b2.1-complete.md)). Der **Outbox-Publisher ist
+implementiert/gemerged, aber nicht aktiviert** (Default `PUBLISHER_ENABLED=false`); der
+vollständige Phase-3-Eventfluss ist **nicht aktiviert**, und es gibt weiterhin
+**keine Exactly-once-Garantie** (at-least-once + Consumer-Idempotenz).
 
 ## Deployment-Voraussetzung (nicht stillschweigend)
 

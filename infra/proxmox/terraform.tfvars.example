@@ -10,11 +10,11 @@ vm_ssh_public_keys = [
 
 vm_ip_configs = {
   hol-site-dc = {
-    address = "10.0.0.201/24"
-    gateway = "10.0.0.1"
+    address = "192.0.2.201/24"
+    gateway = "192.0.2.1"
   }
   hol-site-cloud = {
-    address = "10.0.0.202/24"
-    gateway = "10.0.0.1"
+    address = "192.0.2.202/24"
+    gateway = "192.0.2.1"
   }
 }

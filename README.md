@@ -1,18 +1,78 @@
 # hybrid-ops-lab
 
-Showcase-Projekt für eine DevOps-Rolle (Hybrid Cloud / Data Center).
+[Übersicht](README.md) · [Dokumentation](docs/README.md) · [Status & Roadmap](docs/roadmap.md) · [Nachweise](docs/evidence-index.md) · [Entscheidungen](docs/README.md#entscheidungen) · [Runbooks](docs/README.md#runbooks) · [Security](SECURITY.md)
 
-Demonstriert einen Event-Driven-Flow über zwei simulierte Standorte:
-ein Data-Center-Stack (`site-dc`) und einen Cloud-Stack (`site-cloud`),
-verbunden über eine gedrosselte Netzwerkstrecke (Toxiproxy).
+hybrid-ops-lab ist ein synthetisches Hybrid-Cloud-Lab für einen event-getriebenen
+Bestandsprozess über zwei simulierte Standorte. Das Projekt verbindet reproduzierbare
+Infrastruktur, Transactional Outbox, Queue/DLQ, einen idempotenten Consumer, Monitoring
+und kontrollierte Rollouts.
 
-## Architektur-Überblick
+Consumer, Queue/DLQ und Monitoring sind auf site-cloud live verifiziert. Der
+Outbox-Publisher ist implementiert, aber noch nicht aktiviert. Der vollständige
+Ende-zu-Ende-Eventfluss ist deshalb noch nicht abgeschlossen. Es handelt sich um eine
+synthetische Lab-Umgebung und nicht um eine Produktionsumgebung.
 
-![Architektur-Überblick](docs/img/architecture.png)
+## Architektur
 
-Das Diagramm zeigt die Zielarchitektur; der SQS-Endpoint ist im Lab ElasticMQ
-statt LocalStack (siehe [ADR-005](docs/decisions/005-elasticmq-statt-localstack.md)).
-Der Umsetzungsstand steht im Abschnitt [Status](#status).
+![Architektur des hybrid-ops-lab](docs/img/architecture.png)
+
+Das Diagramm zeigt die Gesamtarchitektur des Labs. site-dc speichert Bestandsbewegungen
+und Outbox-Einträge. site-cloud stellt Queue, DLQ, Consumer und Monitoring bereit.
+Toxiproxy simuliert die Netzwerkstrecke zwischen beiden Standorten. Der Publisher-Pfad
+ist vorbereitet, bleibt aber bis D3B2.3 deaktiviert.
+
+## Aktueller Stand
+
+| Bereich | Stand |
+|---|---|
+| Transactional Outbox auf site-dc | Im Lab verifiziert |
+| Queue und Dead-Letter Queue | Auf site-cloud live verifiziert |
+| Idempotenter Consumer | Auf site-cloud live verifiziert |
+| Prometheus, Grafana und Alertmanager | Live verifiziert |
+| Outbox-Publisher | Implementiert, nicht aktiviert |
+| Vollständiger Ende-zu-Ende-Eventfluss | Noch nicht aktiviert |
+
+Der technische Laufzeitnachweis für den Consumer-Rollout steht im
+[D3B2.1-Rollout-Nachweis](docs/handoff-d3b2.1-complete.md).
+
+## Laufzeit im Lab
+
+![Grafana-Dashboard im Normalbetrieb](docs/img/grafana-dashboard.png)
+
+Das Dashboard zeigt die Netzwerkprobe, die Latenz über die simulierte Strecke sowie
+Metriken der beiden Lab-Standorte.
+
+## Das Problem in einfachen Worten
+
+Im Lager (`site-dc`) entsteht eine Bestandsbewegung — etwa „10 Stück eingebucht". Diese
+Bewegung soll zuverlässig an einen zweiten Standort (`site-cloud`) übertragen und dort
+verarbeitet werden, auch wenn die Verbindung langsam ist oder kurz ausfällt.
+
+Drei typische Probleme dürfen dabei nicht zu falschen Beständen führen:
+
+- **Netzwerkprobleme** — die Strecke kann langsam oder unterbrochen sein.
+- **Doppelte Nachrichten** — dieselbe Bewegung kann mehrfach ankommen (at-least-once).
+- **Fehlerhafte Nachrichten** — eine dauerhaft nicht verarbeitbare Nachricht darf den
+  Betrieb nicht blockieren.
+
+Der aktuelle Stand beweist im Lab: den **Consumer**, seine **Idempotenz** (eine doppelt
+zugestellte Bewegung wirkt nur einmal), **Queue + Dead-Letter-Queue** und das
+**Monitoring**. Der **Publisher-Pfad** (der Bewegungen aus `site-dc` automatisch in die
+Queue stellt) ist gebaut, aber **noch nicht aktiviert**.
+
+## Architektur in 60 Sekunden
+
+- **site-dc** erzeugt Bestandsbewegungen und schreibt sie zusammen mit einem
+  Outbox-Eintrag atomar in PostgreSQL.
+- **site-cloud** enthält Queue (ElasticMQ), Consumer und Monitoring.
+- **Toxiproxy** simuliert die Netzwerkstrecke zwischen beiden Standorten.
+- Der **Publisher-Pfad** (`event_outbox → Queue`) ist vorbereitet, aber noch deaktiviert.
+
+Das Diagramm zeigt die Gesamtarchitektur. Live verifiziert sind der Consumer-, Queue-/
+DLQ- und Monitoring-Pfad auf site-cloud. Der Publisher-Pfad bleibt bis D3B2.3 deaktiviert.
+Der SQS-Endpoint ist im Lab ElasticMQ statt LocalStack
+([ADR-005](docs/decisions/005-elasticmq-statt-localstack.md)); der Umsetzungsstand steht
+im Abschnitt [Status](#status).
 
 ## Infrastructure as Code (OpenTofu)
 
@@ -57,38 +117,38 @@ Referenz (Inputs/Outputs/Provider): [`event-queue`](infra/modules/event-queue/),
 pre-commit-Hooks und in der CI — der SSE-Default der Queue wurde z. B. durch genau
 diesen Scan erzwungen.
 
-## Monitoring & Incident-Nachweis
+## Verhalten bei Netzwerkproblemen
 
 Prometheus scrapt beide Standorte (node-Metriken, die inventory-App und Toxiproxy)
 und probt die Strecke zusätzlich per Blackbox-Exporter. Ein provisioniertes
-Grafana-Dashboard macht die Signale sichtbar.
+Grafana-Dashboard macht die Signale sichtbar (Normalbetrieb siehe Abschnitt
+[Laufzeit im Lab](#laufzeit-im-lab)).
 
-![Grafana-Dashboard im Normalbetrieb](docs/img/grafana-dashboard.png)
+### Simulierte Netzwerkverschlechterung
 
-Normalbetrieb: Die Probe-Latenz über die Strecke liegt im einstelligen
-Millisekundenbereich, die Probe ist erfolgreich (Wert 1), der Durchsatz durch den
-Toxiproxy-Proxy ist stabil, und beide Sites liefern ihre node-Metriken.
+![Grafana während einer gedrosselten Netzwerkstrecke](docs/img/grafana-incident.png)
 
-![Grafana-Dashboard während der gedrosselten Strecke](docs/img/grafana-incident.png)
+- Toxiproxy erhöht die Latenz kontrolliert (~7 s) — die beiden Plateaus sind zwei
+  Drossel-Zyklen.
+- Die Anwendung bleibt erreichbar; die Probe bleibt erfolgreich: die Strecke ist langsam,
+  nicht tot.
+- Das Monitoring zeigt den Unterschied zwischen langsam und nicht erreichbar. Nach dem
+  Aufheben der Störung fällt die Latenz sofort zurück.
 
-Incident: Eine über Toxiproxy injizierte Latenz von ~7 s lässt die Probe-Latenz
-sprunghaft ansteigen — die beiden Plateaus sind zwei Drossel-Zyklen. Die Probe
-bleibt dabei erfolgreich (Wert 1): die Strecke ist langsam, nicht tot. Nach dem
-Aufheben der Störung fällt die Latenz sofort zurück. Reproduzierbar über die
-Chaos-Skripte in `ops/chaos/`; Ablauf und Diagnose im
+Reproduzierbar über die Chaos-Skripte in `ops/chaos/`; Ablauf und Diagnose im
 [Runbook](docs/runbook-link-degradation.md).
 
-Auf dasselbe Signal feuert eine Alert-Regel: `StreckeDegraded`
-(`probe_duration_seconds > 2` für 1 Minute) geht nach anhaltender Drosselung in
-den Zustand *firing* und wird an den Alertmanager geroutet.
+### Alerting
 
 ![Alertmanager mit aktivem StreckeDegraded-Alert](docs/img/alertmanager-firing.png)
 
-Der Alertmanager nutzt im Lab einen Null-Receiver (kein echter Versand, keine
-Secrets im Repo); eine zweite Regel `StreckeDown` (`probe_success == 0`) deckt den
-Totalausfall ab.
+- Die Regel `StreckeDegraded` (`probe_duration_seconds > 2` für 1 Minute) wird erst nach
+  anhaltender Verschlechterung ausgelöst und an den Alertmanager geroutet.
+- Der Alertmanager nutzt im Lab einen Null-Receiver — keine echten Benachrichtigungsziele
+  und keine Secrets im Repository.
+- Eine zweite Regel `StreckeDown` (`probe_success == 0`) deckt den Totalausfall ab.
 
-**Consumer- und Queue-/DLQ-Monitoring (Gate D2, im Repository).** Der Consumer
+**Consumer- und Queue-/DLQ-Monitoring (Gate D2).** Der Consumer
 exponiert niedrig-kardinale Metriken für Liveness und Readiness, Receive-/DB-/
 Delete-Fehler, Redeliveries (`ApproximateReceiveCount > 1`), Poison-/Conflict-Signale
 (Validierungsfehler, Integritätskonflikte) sowie Main-Queue- und DLQ-Tiefe.
@@ -96,8 +156,9 @@ Dazu gehören Alert-Regeln (`ConsumerDown`, `ConsumerNotReady`, `MainQueueBacklo
 `DLQNotEmpty` u. a.) mit großzügigen `for`-Dauern. **Wichtig:** Die Queue-/DLQ-Tiefe
 wird vom Consumer abgefragt — fällt der Consumer aus, fehlen diese Werte, und
 `ConsumerDown` ist dann das primäre Signal. Es gibt **keine** unabhängige
-Queue-Überwachung. Scrape-Pfad und Prometheus-Target werden reproduzierbar
-vorbereitet; eine **Live-Verifikation auf der VM steht noch aus**.
+Queue-Überwachung. Dieser Scrape-Pfad ist mit Gate D3B2.1 **live im Lab verifiziert**
+(`/-/ready` 200, Consumer-Target `up`, Rule-Gruppen `consumer` und `queue` geladen,
+**kein** Publisher-Target aktiv) — siehe [Abschlussnachweis D3B2.1](docs/handoff-d3b2.1-complete.md).
 
 ## Status
 
@@ -129,9 +190,10 @@ Installation lief kontrolliert und idempotent über
 | Phase-2B-Migration (`0001`/`0002`/`0003`, `event_outbox` inkl. Backfill) | ✅ abgeschlossen |
 | Kontrollierter Rollout + Safe Resume (atomarer State, `flock`) | ✅ abgeschlossen |
 | **Gate A** (technisch und formal) | ✅ abgeschlossen |
-| Events (`EVENTS_ENABLED`) | ⏸️ deaktiviert (`false`) |
+| Event-Erzeugung (`EVENTS_ENABLED`) | Durch D3B2.1 nicht verändert |
+| Outbox-Publisher | Nicht aktiviert |
 | Outbox-Einträge | `pending` (kein Publish im HTTP-Request-Pfad) |
-| Event-Flow (Phase 3) | siehe Abschnitt unten (Gate D1/D2 im Repo, nicht live) |
+| Event-Flow (Phase 3) | siehe Abschnitt unten (D1/D2 live im Lab; Phase 3 nicht vollständig aktiviert) |
 
 Der bewiesene Live-Zustand, die erhaltene Fehlerhistorie und der ausgeführte
 Resume-Betriebsnachweis stehen im
@@ -141,38 +203,54 @@ im [Runbook](docs/runbook-phase-2b-upgrade-site-dc.md#resume--read-only-nachveri
 ### Phase 3 — Event-Flow (Consumer-Idempotenz, DLQ, Monitoring)
 
 Phase 3 baut den Weg `event_outbox → separater Publisher → Queue → Consumer` auf.
-`EVENTS_ENABLED=false`, der Publisher ist **standardmäßig deaktiviert** und Phase 3 ist
-**nicht aktiviert**. Wichtige Unterscheidung: **im Repository implementiert & gemerged**
-ist nicht dasselbe wie **live deployed/auf der VM verifiziert**. D1/D2/D3A/D3B1 sind im
-Repository umgesetzt, aber **noch nicht live deployed/verifiziert**.
+Der Publisher ist standardmäßig deaktiviert und Phase 3 ist als vollständiger Event-Flow
+nicht aktiviert. Implementiert im Repository ist nicht dasselbe wie in der Lab-Laufzeit
+verifiziert. Mit D3B2.1 sind D1 und D2 auf `site-cloud` live verifiziert; D3A und D3B1
+sind implementiert, aber nicht aktiviert.
 
-| Gate | Inhalt | Stand |
-|---|---|---|
-| Gate A / Phase 2B | Transactional Outbox, kontrollierter site-dc-Upgrade | ✅ abgeschlossen & verifiziert |
-| Gate D1 | idempotente Consumer-Runtime (Inbox/Projection verdrahtet, Commit vor Queue-Delete, Transport-/Business-Duplikate erkannt, Konflikte/Fehler fail closed) | 🔧 im Repo gemerged · ⛔ nicht live deployed |
-| Gate D2 | Main Queue + DLQ, native Redrive-Policy (`maxReceiveCount = 5`), Poison-Message-Policy, Consumer-/Queue-/DLQ-Metriken & Alerts, reproduzierbarer Scrape-Pfad | 🔧 im Repo gemerged · ⛔ nicht live deployed |
-| Gate D3A | lease-basierter Outbox-Publisher-Kern (Claim/Fencing, einzelnes SendMessage, eigene Least-Privilege-Rolle, Migration `0004`, disabled by default) | 🔧 im Repo gemerged · ⛔ nicht live deployed |
-| Gate D3B1 | Publisher-Service-Wiring (Compose disabled), Secret-Isolation, Route-Config, Prometheus-Scrape + enabled-gated Alerts, kontrolliertes Upgrade-Skript + Fail-closed-Guards | 🔧 im Repo gemerged · ⛔ nicht live deployed |
-| Gate D3B2.1 | site-cloud-isolierter Consumer-/D1-/D2-Rollout-Controller (Queue-Leerheitsgate, Restart-Ack, Build-vor-Migration, DB-Kette, Rollback, Monitoring-Reload) | 🔧 im aktuellen Branch implementiert · ⛔ nicht live durchgeführt |
-| Gate D3B2.2 | site-dc-Migration `0004` + disabled Publisher (getrennt) | ⬜ ausstehend |
-| Gate D3B2.3 | bewusste Publisher-Aktivierung + E2E-Nachweis | ⬜ ausstehend |
-| Phase 3 gesamt | Event-Versand aktiviert | ⛔ nicht aktiviert (`EVENTS_ENABLED=false`) |
+Legende:
 
-Details: [Idempotenz](docs/idempotency.md) (D1), [ADR-007](docs/decisions/007-dlq-and-redrive.md)
+- **Implementiert** — Code und Tests sind vorhanden.
+- **Live verifiziert** — Funktion wurde in der Lab-Laufzeit geprüft.
+- **Aktiviert** — Komponente nimmt am laufenden Eventfluss teil.
+- **Ausstehend** — Umsetzung oder Laufzeitnachweis fehlt noch.
+
+| Bereich | Aktueller Stand |
+|---|---|
+| Basis-Lab und Infrastruktur | Im Lab verifiziert |
+| Transactional Outbox / Gate A | Im Lab verifiziert |
+| Consumer-Idempotenz / D1 | Auf site-cloud live verifiziert |
+| Queue, DLQ und Monitoring / D2 | Auf site-cloud live verifiziert |
+| Publisher-Kern / D3A | Implementiert, nicht aktiviert |
+| Publisher-Wiring / D3B1 | Implementiert, nicht aktiviert |
+| Consumer-Rollout / D3B2.1 | Abgeschlossen und live verifiziert |
+| site-dc-Migration / D3B2.2 | Ausstehend |
+| Publisher-Aktivierung und E2E / D3B2.3 | Ausstehend |
+| Phase 3 gesamt | Noch nicht vollständig aktiviert |
+
+„Live verifiziert" bezieht sich ausschließlich auf die synthetische Lab-Laufzeit, nicht auf
+eine Produktionsumgebung. Der technische Laufzeitnachweis für D3B2.1 ist im
+[D3B2.1-Abschlussnachweis](docs/handoff-d3b2.1-complete.md) dokumentiert. Hintergrund:
+[Idempotenz](docs/idempotency.md) (D1), [ADR-007](docs/decisions/007-dlq-and-redrive.md)
 (D2), [ADR-008](docs/decisions/008-outbox-publisher.md) (D3A/D3B1) und das
-[Phase-3-Runtime-Upgrade-Runbook](docs/runbook-phase-3-runtime-upgrade.md). Nichts davon
-ist produktiv, live oder vollständig ausgerollt.
+[Phase-3-Runtime-Upgrade-Runbook](docs/runbook-phase-3-runtime-upgrade.md).
 
-### Nächster Schritt — Gate D3B2.1 (site-cloud Consumer-/D1-/D2-Rollout)
+### Nächster Schritt — Gate D3B2.2 (site-dc-Migration, Publisher weiterhin deaktiviert)
 
-Der site-cloud-isolierte Rollout-Controller (`ops/deploy/upgrade-consumer-runtime.sh`,
-`make cloud-up`) ist **implementiert, aber noch nicht live durchgeführt**. Er bringt
-D1/D2 kontrolliert live (Queue-Leerheitsgate, Restart-Acknowledgement, Image-Build vor
-Migration, deterministische DB-Kette, Consumer-Deploy mit Rollback, verifizierter
-Prometheus-Reload) — **ohne** site-dc, **ohne** Publisher, **ohne** Phase-3-Aktivierung.
-Details: [D3B2.1-Runbook](docs/runbook-d3b2-consumer-rollout.md). Danach folgen getrennt
-**D3B2.2** (site-dc-Migration `0004`, Variante B, disabled Publisher) und **D3B2.3**
-(bewusste Publisher-Aktivierung + E2E-Nachweis). Keine Live-Verifikation in diesem Stand.
+D3B2.1 wurde am 28. Juni 2026 im Lab erfolgreich verifiziert (D1/D2 auf `site-cloud`);
+die Ergebnisse stehen im [D3B2.1-Abschlussnachweis](docs/handoff-d3b2.1-complete.md).
+
+Der nächste, getrennte Schritt ist **D3B2.2**:
+
+- die site-dc-Migration `0004` (Variante B), der Publisher bleibt dabei deaktiviert;
+- die Publisher-Aktivierung folgt erst mit **D3B2.3**, zusammen mit dem
+  End-to-End-Nachweis;
+- der aktuelle Consumer-/D1-/D2-Zustand auf `site-cloud` bleibt davon unberührt.
+
+D3B2.2 und D3B2.3 sind ausstehend; Phase 3 ist als vollständiger Event-Flow noch nicht
+aktiviert. Vollständiger Fahrplan: [docs/roadmap.md](docs/roadmap.md). Details:
+[D3B2.1-Runbook](docs/runbook-d3b2-consumer-rollout.md),
+[Phase-3-Runtime-Upgrade-Runbook](docs/runbook-phase-3-runtime-upgrade.md).
 
 ## Schnellstart
 
@@ -184,17 +262,33 @@ Voraussetzungen:
 - Pro Stack eine lokale `.env` auf der jeweiligen VM (Vorlagen: `*/.env.example`).
 
 Orchestriert wird vom Desktop aus über `make` (per ssh auf die VMs); die
-VM-Adressen kommen aus `make.env`:
+VM-Adressen kommen aus `make.env`. Dies setzt eingerichtete VMs und lokale `.env`-Dateien
+voraus — ein frischer Clone startet **nicht** ohne diese Umgebung.
+
+**Basis-Lab** (Standorte, Strecke, Monitoring, Incident-Demo):
 
 ```bash
 cp make.env.example make.env   # DC_HOST / CLOUD_HOST eintragen
 
-make up              # beide Sites + Monitoring hoch, Consumer deployen
+make up              # beide Sites + Monitoring hoch
 make check           # Prometheus-Targets + Consumer-Status
 make demo-incident   # Strecken-Latenz einschalten (Toxiproxy)
 make demo-restore    # Störung aufheben
 make down            # Compose-Stacks stoppen (k3d-Cluster bleibt)
 ```
+
+**Kontrollierter D3B2.1-Pfad** (site-cloud-isolierter, release-gebundener Consumer-/
+D1-/D2-Rollout — getrennt vom Basis-`make up`):
+
+```bash
+make cloud-up        # kontrollierter, release-gebundener Fresh Run (D3B2.1)
+make cloud-state     # read-only: Rollout-State anzeigen
+make cloud-check     # read-only: Release-/Monitoring-Prüfung
+make cloud-resume    # NUR bei unvollständigem State desselben Release — nie blind verwenden
+```
+
+Ablauf und Fail-closed-Gates: [D3B2.1-Runbook](docs/runbook-d3b2-consumer-rollout.md).
+Der bewiesene Endzustand steht im [Abschlussnachweis D3B2.1](docs/handoff-d3b2.1-complete.md).
 
 ## Struktur
 
@@ -202,7 +296,9 @@ make down            # Compose-Stacks stoppen (k3d-Cluster bleibt)
 hybrid-ops-lab/
 ├── apps/
 │   ├── inventory/        # FastAPI + Postgres: schreibt Movement + Outbox-Event atomar
-│   └── consumer/         # FastAPI-Consumer (at-least-once, idempotent), laeuft auf k3d
+│   ├── consumer/         # FastAPI-Consumer (at-least-once, idempotent), laeuft auf k3d
+│   └── publisher/        # apps/publisher: Outbox-Publisher (Lease/Fencing) — gemerged,
+│                         #   standardmaessig deaktiviert, nicht live aktiviert (Gate D3A/D3B1)
 ├── sites/
 │   ├── dc/               # Docker-Compose: inventory, Postgres, node_exporter
 │   └── cloud/            # Docker-Compose: ElasticMQ (SQS), Toxiproxy, node_exporter
@@ -224,9 +320,9 @@ hybrid-ops-lab/
 ```
 
 **Event-Flow (Soll):** `inventory` schreibt Movement und Outbox-Event **atomar** in
-einer Transaktion (kein direkter Publish im HTTP-Request-Pfad); ein **künftiger,
-separater Publisher** (Gate D3, noch nicht implementiert) übernimmt
-`event_outbox → Queue`; der `consumer` verarbeitet Queue-Events **idempotent** über
+einer Transaktion (kein direkter Publish im HTTP-Request-Pfad); ein **separater
+Publisher** (Gate D3A/D3B1 implementiert/gemerged, **nicht aktiviert**) übernimmt
+künftig `event_outbox → Queue`; der `consumer` verarbeitet Queue-Events **idempotent** über
 die `event_id` (Inbox/Projection). Siehe [Idempotenz](docs/idempotency.md),
 [ADR-006](docs/decisions/006-transactional-outbox.md) und
 [ADR-007](docs/decisions/007-dlq-and-redrive.md).
@@ -244,4 +340,9 @@ Keine produktiven Secrets im Repository. Siehe [SECURITY.md](SECURITY.md).
 - [ADR-005](docs/decisions/005-elasticmq-statt-localstack.md) – ElasticMQ statt LocalStack als SQS-Endpoint
 - [ADR-006](docs/decisions/006-transactional-outbox.md) – Transactional Outbox statt Publish im Request-Pfad
 - [ADR-007](docs/decisions/007-dlq-and-redrive.md) – DLQ, native Redrive-Policy und Poison-Message-Behandlung
+- [ADR-008](docs/decisions/008-outbox-publisher.md) – Separater Outbox-Publisher (Lease/Fencing, standardmäßig deaktiviert)
 - [Idempotenz](docs/idempotency.md) – Consumer-Idempotenz (Inbox/Projection, Duplikat-/Konfliktbehandlung)
+
+Vollständiger Dokumentationsindex: [docs/README.md](docs/README.md) ·
+Status & Roadmap: [docs/roadmap.md](docs/roadmap.md) ·
+Nachweise: [docs/evidence-index.md](docs/evidence-index.md).

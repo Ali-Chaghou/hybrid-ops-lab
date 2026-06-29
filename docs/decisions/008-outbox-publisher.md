@@ -3,6 +3,16 @@
 ## Status
 Akzeptiert (2026-06-22) — Gate D3A (Kern; Deployment/Monitoring folgen in D3B)
 
+### Status-Nachtrag vom 28. Juni 2026
+
+- D3A (Publisher-Kern, Migration `0004`) implementiert.
+- D3B1 (Publisher-Service-Wiring) implementiert.
+- D3B2.1 (Consumer-Rollout, D1/D2 auf site-cloud) im Lab verifiziert
+  (siehe [D3B2.1-Abschlussnachweis](../handoff-d3b2.1-complete.md)).
+- Der Publisher ist weiterhin nicht aktiviert; die Aktivierung gehört zu D3B2.3.
+- D3B2.2 (site-dc-Migration `0004`) und D3B2.3 (Publisher-Aktivierung und
+  End-to-End-Nachweis) sind geplant (siehe [Roadmap](../roadmap.md)).
+
 ## Kontext
 `event_outbox` (site-dc) ist die dauerhafte Übergabegrenze: `POST /movements`
 schreibt Movement + Outbox-Event atomar, **ohne** im HTTP-Request-Pfad zu
