@@ -7,12 +7,24 @@ Stand bis zum geplanten Phase-3-Abschluss.
 
 ## Aktueller Stand
 
-D3B2.1 wurde am 28. Juni 2026 im Lab abgeschlossen und verifiziert (Release
-`5d319cad54e5a26dd59baacc1c269780ee90b1e4`). D1 und D2 laufen auf `site-cloud`: Consumer
-ready, keine Restarts, Prometheus ready, Consumer-Target up, kein Publisher-Target, Queue
-und DLQ leer. site-dc wurde nicht verändert. Der Publisher und der vollständige
-Phase-3-Eventfluss sind nicht aktiviert. Ergebnisse:
-[D3B2.1-Abschlussnachweis](handoff-d3b2.1-complete.md).
+D3B2.1 wurde am 28. Juni 2026 im Lab abgeschlossen und verifiziert
+(Release `5d319cad54e5a26dd59baacc1c269780ee90b1e4`).
+
+D3B2.2 wurde am 30. Juni 2026 kontrolliert ausgerollt und live verifiziert:
+
+- Migration `0004_add_outbox_claim_fields` ist auf `site-dc` angewendet.
+- Inventory und der deaktivierte Publisher sind healthy.
+- Die Publisher-Rolle erfüllt Least Privilege.
+- Das Publisher-Prometheus-Target ist aktiv und `up`.
+- Prometheus meldet `8/8` Targets up.
+- Main Queue und DLQ sind leer.
+- Keine Outbox-Zeile wurde geclaimt oder publiziert.
+
+Der Publisher und der vollständige Phase-3-Eventfluss sind weiterhin nicht aktiviert.
+
+Nachweise:
+[D3B2.1-Abschlussnachweis](handoff-d3b2.1-complete.md) und
+[D3B2.2-Abschlussnachweis](evidence-d3b2.2.md).
 
 ## D3B2.2 — site-dc-Migration
 
@@ -27,7 +39,8 @@ Phase-3-Eventfluss sind nicht aktiviert. Ergebnisse:
   Eventversand, Monitoring unauffällig.
 - **Rückweg:** dokumentierter Variante-B-Rückweg (siehe
   [Phase-3-Runtime-Upgrade-Runbook](runbook-phase-3-runtime-upgrade.md)).
-- **Status:** geplant.
+- **Status:** am 30. Juni 2026 abgeschlossen und live verifiziert. Nachweis:
+  [D3B2.2-Abschlussnachweis](evidence-d3b2.2.md).
 
 ## D3B2.3 — Publisher-Aktivierung und Ende-zu-Ende-Nachweis
 

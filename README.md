@@ -224,33 +224,34 @@ Legende:
 | Publisher-Kern / D3A | Implementiert, nicht aktiviert |
 | Publisher-Wiring / D3B1 | Implementiert, nicht aktiviert |
 | Consumer-Rollout / D3B2.1 | Abgeschlossen und live verifiziert |
-| site-dc-Migration / D3B2.2 | Ausstehend |
+| site-dc-Migration / D3B2.2 | Abgeschlossen und live verifiziert; Publisher deaktiviert |
 | Publisher-Aktivierung und E2E / D3B2.3 | Ausstehend |
 | Phase 3 gesamt | Noch nicht vollständig aktiviert |
 
 „Live verifiziert" bezieht sich ausschließlich auf die synthetische Lab-Laufzeit, nicht auf
-eine Produktionsumgebung. Der technische Laufzeitnachweis für D3B2.1 ist im
-[D3B2.1-Abschlussnachweis](docs/handoff-d3b2.1-complete.md) dokumentiert. Hintergrund:
+eine Produktionsumgebung. Die technischen Laufzeitnachweise stehen im
+[D3B2.1-Abschlussnachweis](docs/handoff-d3b2.1-complete.md) und im
+[D3B2.2-Abschlussnachweis](docs/evidence-d3b2.2.md). Hintergrund:
 [Idempotenz](docs/idempotency.md) (D1), [ADR-007](docs/decisions/007-dlq-and-redrive.md)
 (D2), [ADR-008](docs/decisions/008-outbox-publisher.md) (D3A/D3B1) und das
 [Phase-3-Runtime-Upgrade-Runbook](docs/runbook-phase-3-runtime-upgrade.md).
 
-### Nächster Schritt — Gate D3B2.2 (site-dc-Migration, Publisher weiterhin deaktiviert)
+### Nächster Schritt — Gate D3B2.3 (Publisher-Aktivierung und E2E)
 
-D3B2.1 wurde am 28. Juni 2026 im Lab erfolgreich verifiziert (D1/D2 auf `site-cloud`);
-die Ergebnisse stehen im [D3B2.1-Abschlussnachweis](docs/handoff-d3b2.1-complete.md).
+D3B2.2 wurde am 30. Juni 2026 im Lab erfolgreich verifiziert. Migration `0004`,
+neue Inventory-Runtime, deaktivierter Publisher, Least-Privilege-Rolle und Monitoring
+sind live nachgewiesen. Die Ergebnisse stehen im
+[D3B2.2-Abschlussnachweis](docs/evidence-d3b2.2.md).
 
-Der nächste, getrennte Schritt ist **D3B2.2**:
+Der nächste, getrennte Schritt ist **D3B2.3**:
 
-- die site-dc-Migration `0004` (Variante B), der Publisher bleibt dabei deaktiviert;
-- die Publisher-Aktivierung folgt erst mit **D3B2.3**, zusammen mit dem
-  End-to-End-Nachweis;
-- der aktuelle Consumer-/D1-/D2-Zustand auf `site-cloud` bleibt davon unberührt.
+- den Publisher bewusst und kontrolliert aktivieren;
+- den Weg `event_outbox → Publisher → Queue → Consumer` nachweisen;
+- Idempotenz-, Duplikat-, Fehler-, DLQ-, Disable- und Rückwegtests durchführen;
+- Phase 3 erst nach diesen Nachweisen als vollständig aktiviert markieren.
 
-D3B2.2 und D3B2.3 sind ausstehend; Phase 3 ist als vollständiger Event-Flow noch nicht
-aktiviert. Vollständiger Fahrplan: [docs/roadmap.md](docs/roadmap.md). Details:
-[D3B2.1-Runbook](docs/runbook-d3b2-consumer-rollout.md),
-[Phase-3-Runtime-Upgrade-Runbook](docs/runbook-phase-3-runtime-upgrade.md).
+Phase 3 ist als vollständiger Event-Flow weiterhin nicht aktiviert. Vollständiger
+Fahrplan: [docs/roadmap.md](docs/roadmap.md).
 
 ## Schnellstart
 

@@ -17,6 +17,6 @@ Lab-Laufzeit geprüft; „aktiviert" bedeutet Teilnahme am laufenden Eventfluss.
 | Publisher-Kern / D3A | Implementiert, nicht aktiviert | `apps/publisher/`, Migration `0004`, [ADR-008](decisions/008-outbox-publisher.md) | — | nicht aktiviert (`PUBLISHER_ENABLED=false`) |
 | Publisher-Wiring / D3B1 | Implementiert, nicht aktiviert | [Phase-3-Runtime-Upgrade-Runbook](runbook-phase-3-runtime-upgrade.md); `monitoring/prometheus/targets/publisher.json.example` | — | Service deaktiviert |
 | Consumer-Rollout / D3B2.1 | Abgeschlossen und live verifiziert | [D3B2.1-Abschlussnachweis](handoff-d3b2.1-complete.md); [D3B2.1-Runbook](runbook-d3b2-consumer-rollout.md) | 28.06.2026 | nur site-cloud; kein Publisher |
-| site-dc-Migration / D3B2.2 | Ausstehend | [Roadmap](roadmap.md) | — | Migration `0004`; Publisher bleibt deaktiviert |
+| site-dc-Migration / D3B2.2 | Abgeschlossen und live verifiziert | [D3B2.2-Abschlussnachweis](evidence-d3b2.2.md); [Runtime-Upgrade-Runbook](runbook-phase-3-runtime-upgrade.md) | 30.06.2026 | Publisher deaktiviert; kein E2E-Eventfluss |
 | Publisher-Aktivierung und E2E / D3B2.3 | Ausstehend | [Roadmap](roadmap.md) | — | bewusste Aktivierung + End-to-End-Nachweis |
 | Phase 3 gesamt | Noch nicht vollständig aktiviert | [README, Phase 3](../README.md); [Roadmap](roadmap.md) | — | kein End-to-End-Eventfluss nachgewiesen |

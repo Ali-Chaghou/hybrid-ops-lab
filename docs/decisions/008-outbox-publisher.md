@@ -13,6 +13,17 @@ Akzeptiert (2026-06-22) — Gate D3A (Kern; Deployment/Monitoring folgen in D3B)
 - D3B2.2 (site-dc-Migration `0004`) und D3B2.3 (Publisher-Aktivierung und
   End-to-End-Nachweis) sind geplant (siehe [Roadmap](../roadmap.md)).
 
+### Status-Nachtrag vom 30. Juni 2026
+
+- D3B2.2 wurde im Lab abgeschlossen und live verifiziert.
+- Migration `0004`, neue Inventory-Runtime und deaktivierter Publisher sind aktiv.
+- Die Rolle `inventory_publisher` erfüllt Least Privilege.
+- Keine Outbox-Zeile wurde geclaimt oder publiziert.
+- Main Queue und DLQ blieben leer.
+- Das Publisher-Prometheus-Target ist aktiv und `up`.
+- D3B2.3 bleibt ausstehend; der vollständige Eventfluss ist nicht aktiviert.
+- Nachweis: [D3B2.2-Abschlussnachweis](../evidence-d3b2.2.md).
+
 ## Kontext
 `event_outbox` (site-dc) ist die dauerhafte Übergabegrenze: `POST /movements`
 schreibt Movement + Outbox-Event atomar, **ohne** im HTTP-Request-Pfad zu
