@@ -69,3 +69,6 @@ sites/dc/.phase3-runtime/
 
 # D3B2.1-Consumer-Rollout-State (site-cloud; vom Rollout-Controller geschrieben)
 sites/cloud/.d3b2-consumer/
+
+# D3B2.3-Publisher-Activation-State (site-dc; vom Activation-Controller geschrieben)
+sites/dc/.phase3-activation/
