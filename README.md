@@ -1,6 +1,15 @@
-# hybrid-ops-lab
+<!-- Kompakte Navigation als Headbar; erscheint direkt unter der nativen GitHub-Leiste.
+     Nur relative Repo-Links, keine externen Dienste. -->
+<p>
+  <a href="README.md"><kbd>Übersicht</kbd></a>
+  <a href="docs/README.md"><kbd>Dokumentation</kbd></a>
+  <a href="docs/roadmap.md"><kbd>Status &amp; Roadmap</kbd></a>
+  <a href="docs/evidence-index.md"><kbd>Nachweise</kbd></a>
+  <a href="docs/README.md#entscheidungen"><kbd>Entscheidungen</kbd></a>
+  <a href="docs/README.md#runbooks"><kbd>Runbooks</kbd></a>
+</p>
 
-[Übersicht](README.md) · [Dokumentation](docs/README.md) · [Status & Roadmap](docs/roadmap.md) · [Nachweise](docs/evidence-index.md) · [Entscheidungen](docs/README.md#entscheidungen) · [Runbooks](docs/README.md#runbooks) · [Security](SECURITY.md)
+# hybrid-ops-lab
 
 hybrid-ops-lab ist ein synthetisches Hybrid-Cloud-Lab für einen event-getriebenen
 Bestandsprozess über zwei simulierte Standorte. Das Projekt verbindet reproduzierbare
@@ -8,8 +17,12 @@ Infrastruktur, Transactional Outbox, Queue/DLQ, einen idempotenten Consumer, Mon
 und kontrollierte Rollouts.
 
 Consumer, Queue/DLQ und Monitoring sind auf site-cloud live verifiziert. Der
-Outbox-Publisher ist implementiert, aber noch nicht aktiviert. Der vollständige
-Ende-zu-Ende-Eventfluss ist deshalb noch nicht abgeschlossen. Es handelt sich um eine
+Outbox-Publisher wurde über den kontrollierten D3B2.3-Aktivierungspfad aktiviert; der
+reale Ende-zu-Ende-Eventfluss von der Inventory-API über Transactional Outbox, Publisher,
+Main Queue und Consumer bis in die Movement-Projection ist damit im Lab live verifiziert,
+ebenso der kontrollierte Disable-/Re-enable-Pfad. Noch offen sind die vollständigen
+Fehler-, Redelivery-, Transport-Duplikat- und DLQ-Nachweise sowie der abschließende
+D3B2.3-Gesamtnachweis; das System bleibt at-least-once. Es handelt sich um eine
 synthetische Lab-Umgebung und nicht um eine Produktionsumgebung.
 
 ## Architektur
@@ -19,21 +32,48 @@ synthetische Lab-Umgebung und nicht um eine Produktionsumgebung.
 Das Diagramm zeigt die Gesamtarchitektur des Labs. site-dc speichert Bestandsbewegungen
 und Outbox-Einträge. site-cloud stellt Queue, DLQ, Consumer und Monitoring bereit.
 Toxiproxy simuliert die Netzwerkstrecke zwischen beiden Standorten. Der Publisher-Pfad
-ist vorbereitet, bleibt aber bis D3B2.3 deaktiviert.
+ist standardmäßig deaktiviert, wurde aber über den kontrollierten D3B2.3-Aktivierungspfad
+aktiviert und der reale Ende-zu-Ende-Eventfluss im Lab nachvollzogen.
 
 ## Aktueller Stand
 
 | Bereich | Stand |
 |---|---|
 | Transactional Outbox auf site-dc | Im Lab verifiziert |
-| Queue und Dead-Letter Queue | Auf site-cloud live verifiziert |
-| Idempotenter Consumer | Auf site-cloud live verifiziert |
+| Main Queue und DLQ | Runtime vorhanden und live geprüft; vollständiger DLQ-Endnachweis offen |
+| Idempotenter Consumer | Implementiert und live verifiziert |
 | Prometheus, Grafana und Alertmanager | Live verifiziert |
-| Outbox-Publisher | Implementiert, nicht aktiviert |
-| Vollständiger Ende-zu-Ende-Eventfluss | Noch nicht aktiviert |
+| Publisher-Aktivierung (kontrollierter D3B2.3-Pfad) | Live verifiziert |
+| Realer Ende-zu-Ende-Eventfluss | Live verifiziert |
+| Kontrollierter Disable-/Re-enable-Pfad | Live verifiziert |
+| Failure Injection / Redelivery | Deploy-Pfad implementiert, Runtime-Test offen |
+| Transport-Duplikat- und DLQ-Endnachweis | Offen |
+| D3B2.3-Gesamtabschluss | Offen |
 
-Der technische Laufzeitnachweis für den Consumer-Rollout steht im
-[D3B2.1-Rollout-Nachweis](docs/handoff-d3b2.1-complete.md).
+Der Consumer-Rollout ist im [D3B2.1-Rollout-Nachweis](docs/handoff-d3b2.1-complete.md)
+belegt, die site-dc-Migration im [D3B2.2-Abschlussnachweis](docs/evidence-d3b2.2.md).
+Das System bleibt at-least-once; Exactly-once wird nicht behauptet.
+
+### Aktueller Laufzeitnachweis
+
+Im Lab real durchlaufen (synthetische Lab-Laufzeit, keine Produktion):
+
+- Ein echtes `POST /movements` durchlief den Pfad Inventory-API → Transactional Outbox →
+  Publisher → Main Queue → Consumer-Inbox → Movement-Projection; der Event wurde in der
+  Outbox als `published` bestätigt und ohne offenen Claim finalisiert.
+- Der Consumer verarbeitete genau den erwarteten Event als `applied`; die Projection
+  enthielt korrekte SKU-, Mengen- und Warehouse-Werte, und Main Queue und DLQ waren nach
+  der Verarbeitung wieder leer.
+- Während der Läufe traten keine Publish-Fehler, Datenbank- oder Delete-Fehler und keine
+  Finalize-Konflikte auf.
+- Bei kontrolliert deaktiviertem Publisher blieb ein neues echtes API-Event `pending` in
+  der Outbox — ohne Claim, mit leerer Main Queue und DLQ und unverändertem Consumer.
+- Nach kontrollierter Reaktivierung wurde genau dieses wartende Event veröffentlicht,
+  konsumiert und in die Projection übernommen; Main Queue und DLQ waren anschließend
+  erneut leer.
+
+Strukturierte Werte, IDs und Metrik-Snapshots dieses Laufs stehen im
+[D3B2.3-Zwischennachweis](docs/evidence-d3b2.3.md) (Zwischenstand, Gesamtnachweis offen).
 
 ## Laufzeit im Lab
 
@@ -58,7 +98,10 @@ Drei typische Probleme dürfen dabei nicht zu falschen Beständen führen:
 Der aktuelle Stand beweist im Lab: den **Consumer**, seine **Idempotenz** (eine doppelt
 zugestellte Bewegung wirkt nur einmal), **Queue + Dead-Letter-Queue** und das
 **Monitoring**. Der **Publisher-Pfad** (der Bewegungen aus `site-dc` automatisch in die
-Queue stellt) ist gebaut, aber **noch nicht aktiviert**.
+Queue stellt) wurde über den kontrollierten D3B2.3-Pfad **aktiviert**, und der **reale
+Ende-zu-Ende-Fluss** wurde einmal komplett nachvollzogen. Die Runtime-Nachweise für
+**doppelte** und **fehlerhafte** Nachrichten (Redelivery, Transport-Duplikat,
+Validation-/Poison-Fall und DLQ-Endnachweis) stehen dagegen noch aus.
 
 ## Architektur in 60 Sekunden
 
@@ -66,11 +109,12 @@ Queue stellt) ist gebaut, aber **noch nicht aktiviert**.
   Outbox-Eintrag atomar in PostgreSQL.
 - **site-cloud** enthält Queue (ElasticMQ), Consumer und Monitoring.
 - **Toxiproxy** simuliert die Netzwerkstrecke zwischen beiden Standorten.
-- Der **Publisher-Pfad** (`event_outbox → Queue`) ist vorbereitet, aber noch deaktiviert.
+- Der **Publisher-Pfad** (`event_outbox → Queue`) ist standardmäßig deaktiviert, wurde
+  aber über den kontrollierten D3B2.3-Pfad aktiviert und real durchlaufen.
 
 Das Diagramm zeigt die Gesamtarchitektur. Live verifiziert sind der Consumer-, Queue-/
-DLQ- und Monitoring-Pfad auf site-cloud. Der Publisher-Pfad bleibt bis D3B2.3 deaktiviert.
-Der SQS-Endpoint ist im Lab ElasticMQ statt LocalStack
+DLQ- und Monitoring-Pfad auf site-cloud sowie der reale Ende-zu-Ende-Eventfluss über den
+kontrolliert aktivierten Publisher. Der SQS-Endpoint ist im Lab ElasticMQ statt LocalStack
 ([ADR-005](docs/decisions/005-elasticmq-statt-localstack.md)); der Umsetzungsstand steht
 im Abschnitt [Status](#status).
 
@@ -191,9 +235,9 @@ Installation lief kontrolliert und idempotent über
 | Kontrollierter Rollout + Safe Resume (atomarer State, `flock`) | ✅ abgeschlossen |
 | **Gate A** (technisch und formal) | ✅ abgeschlossen |
 | Event-Erzeugung (`EVENTS_ENABLED`) | Durch D3B2.1 nicht verändert |
-| Outbox-Publisher | Nicht aktiviert |
+| Outbox-Publisher | Zu Gate A nicht aktiviert (aktueller Stand: Abschnitt [Phase 3](#phase-3--event-flow-consumer-idempotenz-dlq-monitoring)) |
 | Outbox-Einträge | `pending` (kein Publish im HTTP-Request-Pfad) |
-| Event-Flow (Phase 3) | siehe Abschnitt unten (D1/D2 live im Lab; Phase 3 nicht vollständig aktiviert) |
+| Event-Flow (Phase 3) | siehe Abschnitt [Phase 3](#phase-3--event-flow-consumer-idempotenz-dlq-monitoring); aktueller Stand: E2E live verifiziert, Fehler-/DLQ-Endnachweis offen |
 
 Der bewiesene Live-Zustand, die erhaltene Fehlerhistorie und der ausgeführte
 Resume-Betriebsnachweis stehen im
@@ -203,10 +247,13 @@ im [Runbook](docs/runbook-phase-2b-upgrade-site-dc.md#resume--read-only-nachveri
 ### Phase 3 — Event-Flow (Consumer-Idempotenz, DLQ, Monitoring)
 
 Phase 3 baut den Weg `event_outbox → separater Publisher → Queue → Consumer` auf.
-Der Publisher ist standardmäßig deaktiviert und Phase 3 ist als vollständiger Event-Flow
-nicht aktiviert. Implementiert im Repository ist nicht dasselbe wie in der Lab-Laufzeit
-verifiziert. Mit D3B2.1 sind D1 und D2 auf `site-cloud` live verifiziert; D3A und D3B1
-sind implementiert, aber nicht aktiviert.
+Der Publisher ist standardmäßig deaktiviert, wurde jedoch über den kontrollierten
+D3B2.3-Aktivierungspfad aktiviert; der reale Ende-zu-Ende-Eventfluss und der kontrollierte
+Disable-/Re-enable-Pfad sind im Lab live verifiziert. Implementiert im Repository ist nicht
+dasselbe wie in der Lab-Laufzeit verifiziert. Mit D3B2.1 sind D1 und D2 auf `site-cloud`
+live verifiziert. Offen bleiben die Fehlerinjektions-, Redelivery-, Transport-Duplikat- und
+DLQ-Nachweise sowie der abschließende D3B2.3-Gesamtnachweis; Phase 3 ist deshalb noch nicht
+formal abgeschlossen.
 
 Legende:
 
@@ -221,12 +268,14 @@ Legende:
 | Transactional Outbox / Gate A | Im Lab verifiziert |
 | Consumer-Idempotenz / D1 | Auf site-cloud live verifiziert |
 | Queue, DLQ und Monitoring / D2 | Auf site-cloud live verifiziert |
-| Publisher-Kern / D3A | Implementiert, nicht aktiviert |
-| Publisher-Wiring / D3B1 | Implementiert, nicht aktiviert |
+| Publisher-Kern / D3A | Implementiert; standardmäßig deaktiviert |
+| Publisher-Wiring / D3B1 | Implementiert; standardmäßig deaktiviert |
 | Consumer-Rollout / D3B2.1 | Abgeschlossen und live verifiziert |
-| site-dc-Migration / D3B2.2 | Abgeschlossen und live verifiziert; Publisher deaktiviert |
-| Publisher-Aktivierung und E2E / D3B2.3 | Ausstehend |
-| Phase 3 gesamt | Noch nicht vollständig aktiviert |
+| site-dc-Migration / D3B2.2 | Abgeschlossen und live verifiziert; Publisher zu diesem Gate deaktiviert |
+| Publisher-Aktivierung und realer E2E-Fluss / D3B2.3 | Live verifiziert |
+| Kontrollierter Disable-/Re-enable-Pfad / D3B2.3 | Live verifiziert |
+| Fehlerinjektion, Redelivery, Duplikat, DLQ-Endnachweis / D3B2.3 | Deploy-Pfad implementiert, Runtime-Test offen |
+| D3B2.3-Gesamtabschluss und Phase 3 gesamt | Offen |
 
 „Live verifiziert" bezieht sich ausschließlich auf die synthetische Lab-Laufzeit, nicht auf
 eine Produktionsumgebung. Die technischen Laufzeitnachweise stehen im
@@ -243,15 +292,30 @@ neue Inventory-Runtime, deaktivierter Publisher, Least-Privilege-Rolle und Monit
 sind live nachgewiesen. Die Ergebnisse stehen im
 [D3B2.2-Abschlussnachweis](docs/evidence-d3b2.2.md).
 
-Der nächste, getrennte Schritt ist **D3B2.3**:
+In **D3B2.3** wurden inzwischen die folgenden Schritte real im Lab durchlaufen:
 
-- den Publisher bewusst und kontrolliert aktivieren;
-- den Weg `event_outbox → Publisher → Queue → Consumer` nachweisen;
-- Idempotenz-, Duplikat-, Fehler-, DLQ-, Disable- und Rückwegtests durchführen;
-- Phase 3 erst nach diesen Nachweisen als vollständig aktiviert markieren.
+- der Publisher wurde über den kontrollierten Aktivierungspfad bewusst aktiviert;
+- der Weg Inventory-API → Transactional Outbox → Publisher → Main Queue → Consumer-Inbox →
+  Movement-Projection wurde für ein echtes `POST /movements` durchgängig nachgewiesen;
+- der kontrollierte Disable-/Re-enable-Pfad wurde getestet: bei deaktiviertem Publisher
+  blieb ein neues echtes API-Event `pending` ohne Claim, mit leerer Main Queue und DLQ;
+  nach Reaktivierung wurde genau dieses Event veröffentlicht, konsumiert und projiziert.
 
-Phase 3 ist als vollständiger Event-Flow weiterhin nicht aktiviert. Vollständiger
-Fahrplan: [docs/roadmap.md](docs/roadmap.md).
+Noch offen sind — und werden erst nach ihrem Laufzeitnachweis als erledigt markiert:
+
+- One-shot-Fehlerinjektion nach DB-Commit und vor Queue-Delete;
+- Redelivery nach Visibility Timeout und ein Transport-Duplikat in der realen Laufzeit;
+- Poison-/Validierungsfehlerfall und der vollständige DLQ-Redrive-Nachweis;
+- der abschließende D3B2.3-Gesamtnachweis.
+
+Für die offenen Fehlerszenarien ist ein kontrollierter Deploy-Pfad implementiert und
+lokal getestet: das vorhandene immutable Consumer-Image wird wiederverwendet (kein neuer
+Build unter dem alten Release-Tag), die Injektion ist ausschließlich explizit aktivierbar,
+der Default bleibt deaktiviert, bei Image-Mismatch wird fail-closed abgebrochen, und
+Contract-Tests sind vorhanden. Der eigentliche Runtime-Nachweis steht noch aus.
+
+Das System bleibt at-least-once; Exactly-once wird nicht behauptet. Phase 3 ist damit
+noch nicht formal abgeschlossen. Vollständiger Fahrplan: [docs/roadmap.md](docs/roadmap.md).
 
 ## Schnellstart
 
@@ -299,7 +363,8 @@ hybrid-ops-lab/
 │   ├── inventory/        # FastAPI + Postgres: schreibt Movement + Outbox-Event atomar
 │   ├── consumer/         # FastAPI-Consumer (at-least-once, idempotent), laeuft auf k3d
 │   └── publisher/        # apps/publisher: Outbox-Publisher (Lease/Fencing) — gemerged,
-│                         #   standardmaessig deaktiviert, nicht live aktiviert (Gate D3A/D3B1)
+│                         #   standardmaessig deaktiviert; ueber den kontrollierten
+│                         #   D3B2.3-Pfad aktiviert und real durchlaufen
 ├── sites/
 │   ├── dc/               # Docker-Compose: inventory, Postgres, node_exporter
 │   └── cloud/            # Docker-Compose: ElasticMQ (SQS), Toxiproxy, node_exporter
@@ -320,11 +385,12 @@ hybrid-ops-lab/
 └── Makefile              # Desktop-Orchestrierung (make up/check/demo-*/down)
 ```
 
-**Event-Flow (Soll):** `inventory` schreibt Movement und Outbox-Event **atomar** in
+**Event-Flow:** `inventory` schreibt Movement und Outbox-Event **atomar** in
 einer Transaktion (kein direkter Publish im HTTP-Request-Pfad); ein **separater
-Publisher** (Gate D3A/D3B1 implementiert/gemerged, **nicht aktiviert**) übernimmt
-künftig `event_outbox → Queue`; der `consumer` verarbeitet Queue-Events **idempotent** über
-die `event_id` (Inbox/Projection). Siehe [Idempotenz](docs/idempotency.md),
+Publisher** (Gate D3A/D3B1 implementiert/gemerged, **standardmäßig deaktiviert**, über den
+kontrollierten D3B2.3-Pfad aktiviert und real durchlaufen) übernimmt `event_outbox → Queue`;
+der `consumer` verarbeitet Queue-Events **idempotent** über die `event_id`
+(Inbox/Projection). Siehe [Idempotenz](docs/idempotency.md),
 [ADR-006](docs/decisions/006-transactional-outbox.md) und
 [ADR-007](docs/decisions/007-dlq-and-redrive.md).
 

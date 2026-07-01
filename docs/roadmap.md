@@ -20,11 +20,17 @@ D3B2.2 wurde am 30. Juni 2026 kontrolliert ausgerollt und live verifiziert:
 - Main Queue und DLQ sind leer.
 - Keine Outbox-Zeile wurde geclaimt oder publiziert.
 
-Der Publisher und der vollständige Phase-3-Eventfluss sind weiterhin nicht aktiviert.
+D3B2.3 wurde am 30. Juni 2026 begonnen und ist **in progress**: Aktivierungs-Preflight,
+kontrollierte Publisher-Aktivierung, ein echter Ende-zu-Ende-Pfad sowie Disable-Test und
+Re-enable mit sicherem Backlog-Nachlauf sind im Lab live verifiziert. Die Fehler-,
+Redelivery-, Duplikat-, Validation-/Poison- und DLQ-Redrive-Nachweise sowie der
+abschließende Gesamtcheck stehen noch aus. Phase 3 ist deshalb noch nicht formal
+abgeschlossen. Das System bleibt at-least-once.
 
 Nachweise:
-[D3B2.1-Abschlussnachweis](handoff-d3b2.1-complete.md) und
-[D3B2.2-Abschlussnachweis](evidence-d3b2.2.md).
+[D3B2.1-Abschlussnachweis](handoff-d3b2.1-complete.md),
+[D3B2.2-Abschlussnachweis](evidence-d3b2.2.md) und
+[D3B2.3-Zwischennachweis](evidence-d3b2.3.md).
 
 ## D3B2.2 — site-dc-Migration
 
@@ -55,7 +61,30 @@ Nachweise:
 - **Erfolgskriterien:** Ende-zu-Ende belegt; Idempotenz, DLQ-Weg, Negativfall, Disable und
   Rückweg getestet; Publisher-Metriken und Alerts in der Lab-Laufzeit sichtbar.
 - **Rückweg:** `PUBLISHER_ENABLED=false` und Disable-Test.
-- **Status:** geplant.
+
+**Abgeschlossen innerhalb D3B2.3** (am 30. Juni 2026 live verifiziert, Nachweis:
+[D3B2.3-Zwischennachweis](evidence-d3b2.3.md)):
+
+- Aktivierungs-Preflight;
+- Publisher-Aktivierung;
+- realer E2E-Pfad (Inventory API → Transactional Outbox → Publisher → Main Queue →
+  Consumer Inbox → Movement Projection);
+- Disable-Test (Event blieb `pending` ohne Claim, Main Queue und DLQ leer);
+- Re-enable und sicherer Backlog-Nachlauf (das wartende Event wurde veröffentlicht,
+  konsumiert und projiziert).
+
+**Offen innerhalb D3B2.3:**
+
+- Failure Injection (One-shot nach DB-Commit und vor Queue-Delete);
+- Redelivery nach Visibility Timeout;
+- Transport-Duplikat in der realen Laufzeit;
+- Validation-/Poison-Fall;
+- vollständiger nativer DLQ-Redrive-Nachweis;
+- abschließender Gesamtcheck;
+- formaler Abschluss.
+
+- **Status:** in progress. Der Failure-Injection-Deploy-Pfad ist implementiert und lokal
+  getestet; der zugehörige Runtime-Lauf steht noch aus.
 
 ## Weitere Abschlussarbeiten
 
