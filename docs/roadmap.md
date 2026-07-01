@@ -22,10 +22,13 @@ D3B2.2 wurde am 30. Juni 2026 kontrolliert ausgerollt und live verifiziert:
 
 D3B2.3 wurde am 30. Juni 2026 begonnen und ist **in progress**: Aktivierungs-Preflight,
 kontrollierte Publisher-Aktivierung, ein echter Ende-zu-Ende-Pfad sowie Disable-Test und
-Re-enable mit sicherem Backlog-Nachlauf sind im Lab live verifiziert. Die Fehler-,
-Redelivery-, Duplikat-, Validation-/Poison- und DLQ-Redrive-Nachweise sowie der
-abschließende Gesamtcheck stehen noch aus. Phase 3 ist deshalb noch nicht formal
-abgeschlossen. Das System bleibt at-least-once.
+Re-enable mit sicherem Backlog-Nachlauf sind im Lab live verifiziert. Am 2. Juli 2026
+wurden zusätzlich die One-shot Failure Injection nach DB-Commit und vor Queue-Delete,
+die Redelivery nach Visibility Timeout, das Transport-Duplikat und die genau einmalige
+fachliche Projection-Wirkung live bewiesen. Offen bleiben der Validation-/Poison-Fall,
+der vollständige DLQ-Weg, Redrive oder eine dokumentierte ElasticMQ-Grenze sowie der
+abschließende Gesamtcheck. Phase 3 ist deshalb noch nicht formal abgeschlossen. Das
+System bleibt at-least-once.
 
 Nachweise:
 [D3B2.1-Abschlussnachweis](handoff-d3b2.1-complete.md),
@@ -62,8 +65,8 @@ Nachweise:
   Rückweg getestet; Publisher-Metriken und Alerts in der Lab-Laufzeit sichtbar.
 - **Rückweg:** `PUBLISHER_ENABLED=false` und Disable-Test.
 
-**Abgeschlossen innerhalb D3B2.3** (am 30. Juni 2026 live verifiziert, Nachweis:
-[D3B2.3-Zwischennachweis](evidence-d3b2.3.md)):
+**Abgeschlossen innerhalb D3B2.3** (am 30. Juni und 2. Juli 2026 live verifiziert,
+Nachweis: [D3B2.3-Runtime-Nachweis](evidence-d3b2.3.md)):
 
 - Aktivierungs-Preflight;
 - Publisher-Aktivierung;
@@ -71,20 +74,23 @@ Nachweise:
   Consumer Inbox → Movement Projection);
 - Disable-Test (Event blieb `pending` ohne Claim, Main Queue und DLQ leer);
 - Re-enable und sicherer Backlog-Nachlauf (das wartende Event wurde veröffentlicht,
-  konsumiert und projiziert).
+  konsumiert und projiziert);
+- One-shot Failure Injection nach DB-Commit und vor Queue-Delete;
+- Redelivery nach dem Visibility Timeout;
+- Transport-Duplikat derselben Queue-Nachricht und `event_id`;
+- exakt eine Inbox-Zeile und eine Projection-Wirkung trotz zweifacher Zustellung;
+- kontrollierter Rollback der Injection auf `0`.
 
 **Offen innerhalb D3B2.3:**
 
-- Failure Injection (One-shot nach DB-Commit und vor Queue-Delete);
-- Redelivery nach Visibility Timeout;
-- Transport-Duplikat in der realen Laufzeit;
-- Validation-/Poison-Fall;
-- vollständiger nativer DLQ-Redrive-Nachweis;
+- kontrollierter Validation-/Poison-Fall;
+- vollständiger Weg einer dauerhaft nicht verarbeitbaren Nachricht in die DLQ;
+- Redrive aus der DLQ oder belastbare Dokumentation einer ElasticMQ-Grenze;
 - abschließender Gesamtcheck;
 - formaler Abschluss.
 
-- **Status:** in progress. Der Failure-Injection-Deploy-Pfad ist implementiert und lokal
-  getestet; der zugehörige Runtime-Lauf steht noch aus.
+- **Status:** in progress. Failure Injection, Redelivery und Transport-Duplikat sind
+  live verifiziert; Poison-, DLQ- und Redrive-Nachweise stehen noch aus.
 
 ## Weitere Abschlussarbeiten
 

@@ -20,10 +20,13 @@ Consumer, Queue/DLQ und Monitoring sind auf site-cloud live verifiziert. Der
 Outbox-Publisher wurde über den kontrollierten D3B2.3-Aktivierungspfad aktiviert; der
 reale Ende-zu-Ende-Eventfluss von der Inventory-API über Transactional Outbox, Publisher,
 Main Queue und Consumer bis in die Movement-Projection ist damit im Lab live verifiziert,
-ebenso der kontrollierte Disable-/Re-enable-Pfad. Noch offen sind die vollständigen
-Fehler-, Redelivery-, Transport-Duplikat- und DLQ-Nachweise sowie der abschließende
-D3B2.3-Gesamtnachweis; das System bleibt at-least-once. Es handelt sich um eine
-synthetische Lab-Umgebung und nicht um eine Produktionsumgebung.
+ebenso der kontrollierte Disable-/Re-enable-Pfad. Zusätzlich sind eine One-shot Failure
+Injection nach DB-Commit und vor Queue-Delete, die Redelivery nach Visibility Timeout und
+die idempotente Behandlung des Transport-Duplikats live bewiesen. Offen bleiben der
+Validation-/Poison-Fall, der vollständige DLQ-Weg, Redrive oder eine dokumentierte
+ElasticMQ-Grenze sowie der abschließende D3B2.3-Gesamtnachweis. Das System bleibt
+at-least-once. Es handelt sich um eine synthetische Lab-Umgebung und nicht um eine
+Produktionsumgebung.
 
 ## Architektur
 
@@ -46,8 +49,9 @@ aktiviert und der reale Ende-zu-Ende-Eventfluss im Lab nachvollzogen.
 | Publisher-Aktivierung (kontrollierter D3B2.3-Pfad) | Live verifiziert |
 | Realer Ende-zu-Ende-Eventfluss | Live verifiziert |
 | Kontrollierter Disable-/Re-enable-Pfad | Live verifiziert |
-| Failure Injection / Redelivery | Deploy-Pfad implementiert, Runtime-Test offen |
-| Transport-Duplikat- und DLQ-Endnachweis | Offen |
+| Failure Injection / Redelivery | Live verifiziert |
+| Transport-Duplikat | Live verifiziert; genau eine fachliche Wirkung |
+| Validation-/Poison- und DLQ-Endnachweis | Offen |
 | D3B2.3-Gesamtabschluss | Offen |
 
 Der Consumer-Rollout ist im [D3B2.1-Rollout-Nachweis](docs/handoff-d3b2.1-complete.md)
@@ -71,9 +75,15 @@ Im Lab real durchlaufen (synthetische Lab-Laufzeit, keine Produktion):
 - Nach kontrollierter Reaktivierung wurde genau dieses wartende Event veröffentlicht,
   konsumiert und in die Projection übernommen; Main Queue und DLQ waren anschließend
   erneut leer.
+- Eine One-shot Failure Injection feuerte nach dem fachlichen DB-Commit und vor dem
+  Queue-Delete. Dieselbe Nachricht wurde nach dem Visibility Timeout erneut zugestellt
+  und als Transport-Duplikat erkannt.
+- Zwei Transportzustellungen erzeugten exakt eine Inbox-Zeile und eine
+  Movement-Projection. Danach waren Main Queue und DLQ leer und die Injection wieder
+  explizit auf `0` gesetzt.
 
-Strukturierte Werte, IDs und Metrik-Snapshots dieses Laufs stehen im
-[D3B2.3-Zwischennachweis](docs/evidence-d3b2.3.md) (Zwischenstand, Gesamtnachweis offen).
+Strukturierte Werte, IDs und Metrik-Snapshots dieser Läufe stehen im
+[D3B2.3-Runtime-Nachweis](docs/evidence-d3b2.3.md) (Gesamtnachweis noch offen).
 
 ## Laufzeit im Lab
 
@@ -99,9 +109,10 @@ Der aktuelle Stand beweist im Lab: den **Consumer**, seine **Idempotenz** (eine 
 zugestellte Bewegung wirkt nur einmal), **Queue + Dead-Letter-Queue** und das
 **Monitoring**. Der **Publisher-Pfad** (der Bewegungen aus `site-dc` automatisch in die
 Queue stellt) wurde über den kontrollierten D3B2.3-Pfad **aktiviert**, und der **reale
-Ende-zu-Ende-Fluss** wurde einmal komplett nachvollzogen. Die Runtime-Nachweise für
-**doppelte** und **fehlerhafte** Nachrichten (Redelivery, Transport-Duplikat,
-Validation-/Poison-Fall und DLQ-Endnachweis) stehen dagegen noch aus.
+Ende-zu-Ende-Fluss** wurde komplett nachvollzogen. Redelivery und Transport-Duplikat
+wurden ebenfalls live bewiesen: dieselbe Queue-Nachricht kam zweimal an, erzeugte aber
+nur eine fachliche Wirkung. Offen bleiben der Validation-/Poison-Fall, der vollständige
+DLQ-Weg und der Redrive-Nachweis beziehungsweise eine dokumentierte ElasticMQ-Grenze.
 
 ## Architektur in 60 Sekunden
 
@@ -237,7 +248,7 @@ Installation lief kontrolliert und idempotent über
 | Event-Erzeugung (`EVENTS_ENABLED`) | Durch D3B2.1 nicht verändert |
 | Outbox-Publisher | Zu Gate A nicht aktiviert (aktueller Stand: Abschnitt [Phase 3](#phase-3--event-flow-consumer-idempotenz-dlq-monitoring)) |
 | Outbox-Einträge | `pending` (kein Publish im HTTP-Request-Pfad) |
-| Event-Flow (Phase 3) | siehe Abschnitt [Phase 3](#phase-3--event-flow-consumer-idempotenz-dlq-monitoring); aktueller Stand: E2E live verifiziert, Fehler-/DLQ-Endnachweis offen |
+| Event-Flow (Phase 3) | siehe Abschnitt [Phase 3](#phase-3--event-flow-consumer-idempotenz-dlq-monitoring); aktueller Stand: E2E, Failure Injection, Redelivery und Transport-Duplikat live verifiziert; Poison-/DLQ-/Redrive-Nachweis offen |
 
 Der bewiesene Live-Zustand, die erhaltene Fehlerhistorie und der ausgeführte
 Resume-Betriebsnachweis stehen im
@@ -249,11 +260,13 @@ im [Runbook](docs/runbook-phase-2b-upgrade-site-dc.md#resume--read-only-nachveri
 Phase 3 baut den Weg `event_outbox → separater Publisher → Queue → Consumer` auf.
 Der Publisher ist standardmäßig deaktiviert, wurde jedoch über den kontrollierten
 D3B2.3-Aktivierungspfad aktiviert; der reale Ende-zu-Ende-Eventfluss und der kontrollierte
-Disable-/Re-enable-Pfad sind im Lab live verifiziert. Implementiert im Repository ist nicht
-dasselbe wie in der Lab-Laufzeit verifiziert. Mit D3B2.1 sind D1 und D2 auf `site-cloud`
-live verifiziert. Offen bleiben die Fehlerinjektions-, Redelivery-, Transport-Duplikat- und
-DLQ-Nachweise sowie der abschließende D3B2.3-Gesamtnachweis; Phase 3 ist deshalb noch nicht
-formal abgeschlossen.
+Disable-/Re-enable-Pfad sind im Lab live verifiziert. Zusätzlich sind Failure Injection,
+Redelivery nach Visibility Timeout und die idempotente Behandlung eines echten
+Transport-Duplikats live bewiesen. Implementiert im Repository ist nicht dasselbe wie in
+der Lab-Laufzeit verifiziert. Mit D3B2.1 sind D1 und D2 auf `site-cloud` live verifiziert.
+Offen bleiben Validation/Poison, der vollständige DLQ-Weg, Redrive oder eine dokumentierte
+ElasticMQ-Grenze sowie der abschließende D3B2.3-Gesamtnachweis; Phase 3 ist deshalb noch
+nicht formal abgeschlossen.
 
 Legende:
 
@@ -274,7 +287,8 @@ Legende:
 | site-dc-Migration / D3B2.2 | Abgeschlossen und live verifiziert; Publisher zu diesem Gate deaktiviert |
 | Publisher-Aktivierung und realer E2E-Fluss / D3B2.3 | Live verifiziert |
 | Kontrollierter Disable-/Re-enable-Pfad / D3B2.3 | Live verifiziert |
-| Fehlerinjektion, Redelivery, Duplikat, DLQ-Endnachweis / D3B2.3 | Deploy-Pfad implementiert, Runtime-Test offen |
+| Fehlerinjektion, Redelivery und Transport-Duplikat / D3B2.3 | Live verifiziert |
+| Validation-/Poison-Fall, DLQ-Endnachweis und Redrive / D3B2.3 | Offen |
 | D3B2.3-Gesamtabschluss und Phase 3 gesamt | Offen |
 
 „Live verifiziert" bezieht sich ausschließlich auf die synthetische Lab-Laufzeit, nicht auf
@@ -299,20 +313,25 @@ In **D3B2.3** wurden inzwischen die folgenden Schritte real im Lab durchlaufen:
   Movement-Projection wurde für ein echtes `POST /movements` durchgängig nachgewiesen;
 - der kontrollierte Disable-/Re-enable-Pfad wurde getestet: bei deaktiviertem Publisher
   blieb ein neues echtes API-Event `pending` ohne Claim, mit leerer Main Queue und DLQ;
-  nach Reaktivierung wurde genau dieses Event veröffentlicht, konsumiert und projiziert.
+  nach Reaktivierung wurde genau dieses Event veröffentlicht, konsumiert und projiziert;
+- eine One-shot-Fehlerinjektion wurde nach DB-Commit und vor Queue-Delete ausgelöst;
+- dieselbe Queue-Nachricht wurde nach dem Visibility Timeout erneut zugestellt und als
+  Transport-Duplikat erkannt;
+- beide Zustellungen erzeugten exakt eine Inbox-Zeile und eine Movement-Projection;
+- die Injection wurde nach dem Test kontrolliert auf `0` zurückgesetzt.
 
 Noch offen sind — und werden erst nach ihrem Laufzeitnachweis als erledigt markiert:
 
-- One-shot-Fehlerinjektion nach DB-Commit und vor Queue-Delete;
-- Redelivery nach Visibility Timeout und ein Transport-Duplikat in der realen Laufzeit;
-- Poison-/Validierungsfehlerfall und der vollständige DLQ-Redrive-Nachweis;
+- kontrollierter Poison-/Validierungsfehlerfall;
+- vollständiger Weg einer dauerhaft nicht verarbeitbaren Nachricht in die DLQ;
+- Redrive aus der DLQ oder belastbare Dokumentation einer ElasticMQ-Grenze;
 - der abschließende D3B2.3-Gesamtnachweis.
 
-Für die offenen Fehlerszenarien ist ein kontrollierter Deploy-Pfad implementiert und
-lokal getestet: das vorhandene immutable Consumer-Image wird wiederverwendet (kein neuer
-Build unter dem alten Release-Tag), die Injektion ist ausschließlich explizit aktivierbar,
-der Default bleibt deaktiviert, bei Image-Mismatch wird fail-closed abgebrochen, und
-Contract-Tests sind vorhanden. Der eigentliche Runtime-Nachweis steht noch aus.
+Der kontrollierte Failure-Injection-Deploy-Pfad ist implementiert, getestet und live
+verifiziert: das vorhandene immutable Consumer-Image wurde wiederverwendet, ohne einen
+neuen Build oder Import unter dem alten Release-Tag. Die Injection war ausschließlich
+explizit aktivierbar, bei Image-Mismatch wurde fail-closed abgebrochen und der sichere
+Endzustand anschließend wieder mit `LAB_FAIL_AFTER_COMMIT_ONCE=0` hergestellt.
 
 Das System bleibt at-least-once; Exactly-once wird nicht behauptet. Phase 3 ist damit
 noch nicht formal abgeschlossen. Vollständiger Fahrplan: [docs/roadmap.md](docs/roadmap.md).
