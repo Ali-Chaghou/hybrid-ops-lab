@@ -69,6 +69,11 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
+          # Kontrollierte Lab-Injection. deploy-consumer.sh rendert ausschliesslich
+          # den validierten Wert 0 oder 1; der sichere Standard ist 0.
+          env:
+            - name: LAB_FAIL_AFTER_COMMIT_ONCE
+              value: "__LAB_FAIL_AFTER_COMMIT_ONCE__"
           envFrom:
             - configMapRef:
                 name: consumer-config

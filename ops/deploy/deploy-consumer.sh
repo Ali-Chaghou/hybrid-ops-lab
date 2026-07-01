@@ -25,6 +25,23 @@ case "${IMAGE}" in
 esac
 printf '%s' "${IMAGE}" | grep -Eq '^[A-Za-z0-9._/-]+:[A-Za-z0-9._-]+$' \
   || { echo "[deploy-consumer] FEHLER: IMAGE muss die Form repo:tag haben." >&2; exit 1; }
+# Kontrollierter Lab-Testmodus. Sichere Defaults: normales Build/Import und
+# Failure-Injection AUS. Beide Werte sind eng auf 0 oder 1 begrenzt.
+REUSE_EXISTING_IMAGE="${CONSUMER_REUSE_EXISTING_IMAGE:-0}"
+FAIL_AFTER_COMMIT_ONCE="${CONSUMER_LAB_FAIL_AFTER_COMMIT_ONCE:-0}"
+case "${REUSE_EXISTING_IMAGE}" in
+  0|1) ;;
+  *) echo "[deploy-consumer] FEHLER: CONSUMER_REUSE_EXISTING_IMAGE erlaubt nur 0 oder 1." >&2; exit 1 ;;
+esac
+case "${FAIL_AFTER_COMMIT_ONCE}" in
+  0|1) ;;
+  *) echo "[deploy-consumer] FEHLER: CONSUMER_LAB_FAIL_AFTER_COMMIT_ONCE erlaubt nur 0 oder 1." >&2; exit 1 ;;
+esac
+if [ "${FAIL_AFTER_COMMIT_ONCE}" = "1" ] && [ "${REUSE_EXISTING_IMAGE}" != "1" ]; then
+  echo "[deploy-consumer] FEHLER: Failure-Injection ist nur mit CONSUMER_REUSE_EXISTING_IMAGE=1 erlaubt." >&2
+  exit 1
+fi
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MANIFEST="${REPO_ROOT}/sites/cloud/k8s/consumer.yaml"
 ENV_FILE="${ENV_FILE:-${REPO_ROOT}/sites/cloud/.env}"
@@ -74,12 +91,38 @@ echo "[deploy-consumer] NodePort ${METRICS_NODEPORT} auf Host veroeffentlicht (v
 
 # Image bauen + importieren — BEVOR irgendwelche Secrets geladen werden, damit waehrend
 # des Builds nichts Geheimes in der Umgebung steht. Kontext = Repo-Root (ops/ + Migrationen).
-docker build -t "${IMAGE}" -f "${REPO_ROOT}/apps/consumer/Dockerfile" "${REPO_ROOT}"
-k3d image import "${IMAGE}" -c "${CLUSTER}"
+if [ "${REUSE_EXISTING_IMAGE}" = "0" ]; then
+  docker build -t "${IMAGE}" -f "${REPO_ROOT}/apps/consumer/Dockerfile" "${REPO_ROOT}"
+  k3d image import "${IMAGE}" -c "${CLUSTER}"
+else
+  echo "[deploy-consumer] Vorhandenes immutable Image ${IMAGE} wird wiederverwendet; kein Build/Import."
+fi
 
-# Namespace sicherstellen (idempotent) — muss vor dem Secret existieren.
-kubectl create namespace inventory --dry-run=client -o yaml | kubectl apply -f -
-
+# Beim Wiederverwenden muss exakt dieses Image bereits als gesunder Runtime-Stand
+# laufen. Kein stiller Fallback auf ein anderes oder neu gebautes Image.
+if [ "${REUSE_EXISTING_IMAGE}" = "1" ]; then
+  if ! CURRENT_IMAGE="$(
+    kubectl -n inventory get deployment inventory-consumer \
+      -o "jsonpath={.spec.template.spec.containers[0].image}" 2>/dev/null
+  )"; then
+    echo "[deploy-consumer] FEHLER: bestehendes Consumer-Deployment nicht lesbar." >&2
+    exit 1
+  fi
+  if [ "${CURRENT_IMAGE}" != "${IMAGE}" ]; then
+    echo "[deploy-consumer] FEHLER: laufendes Image stimmt nicht exakt mit IMAGE=${IMAGE} ueberein." >&2
+    exit 1
+  fi
+  if ! kubectl -n inventory rollout status \
+    deployment/inventory-consumer --timeout=15s >/dev/null
+  then
+    echo "[deploy-consumer] FEHLER: bestehendes Consumer-Deployment ist nicht ready." >&2
+    exit 1
+  fi
+  echo "[deploy-consumer] Bestehendes ready Deployment nutzt exakt ${IMAGE} — Wiederverwendung erlaubt."
+else
+  # Namespace sicherstellen (idempotent) — muss vor dem Secret existieren.
+  kubectl create namespace inventory --dry-run=client -o yaml | kubectl apply -f -
+fi
 # --- Enger, kontrollierter Secret-Block --------------------------------------
 # Die .env wird NICHT global exportiert (kein `set -a`), damit POSTGRES_PASSWORD,
 # CONSUMER_*_PASSWORD und die DATABASE_URL nicht in den Environments von docker/
@@ -109,10 +152,15 @@ create_db_secret() {
 create_db_secret
 trap - EXIT
 
-# Manifest anwenden: NICHT-geheime Gateway-IP UND der tatsaechlich gebaute Image-Tag
-# werden per sed gesetzt (beide vorab validiert -> keine Injection).
-kubectl apply -f <(sed -e "s|__K3D_GATEWAY__|${GATEWAY}|g" -e "s|__CONSUMER_IMAGE__|${IMAGE}|g" "${MANIFEST}")
-
+# Manifest anwenden: NICHT-geheime Gateway-IP, verwendeter Image-Tag und Lab-Schalter
+# werden per sed gesetzt. Alle drei Werte wurden vorher eng validiert.
+kubectl apply -f <(
+  sed \
+    -e "s|__K3D_GATEWAY__|${GATEWAY}|g" \
+    -e "s|__CONSUMER_IMAGE__|${IMAGE}|g" \
+    -e "s|__LAB_FAIL_AFTER_COMMIT_ONCE__|${FAIL_AFTER_COMMIT_ONCE}|g" \
+    "${MANIFEST}"
+)
 # Rollout neu anstossen, damit der Pod eine ggf. rotierte DATABASE_URL uebernimmt
 # (envFrom-Secret-Aenderungen starten Pods nicht automatisch neu).
 kubectl -n inventory rollout restart deployment/inventory-consumer
